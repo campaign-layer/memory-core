@@ -20,6 +20,7 @@ Standalone, reusable memory service for multi-app AI systems (PACER, mAItrix, an
 ## Current implementation
 
 - Provider: in-memory reference provider (`src/providers/in-memory-provider.ts`)
+- Optional provider: Mem0-backed provider (`src/providers/mem0-provider.ts`)
 - Retrieval: lexical overlap + recency + confidence/importance weighting
 - Dedupe: actor/type/text exact dedupe at ingest
 - Lifecycle: memory decay policy + compaction (`POST /v1/memory/compact`)
@@ -67,10 +68,14 @@ Service starts on `http://0.0.0.0:7401` by default.
 Environment variables:
 1. `PORT` (default `7401`)
 2. `HOST` (default `0.0.0.0`)
-3. `MEMORY_PROVIDER` (`in-memory` | `file`, default `in-memory`)
+3. `MEMORY_PROVIDER` (`in-memory` | `file` | `mem0`, default `in-memory`)
 4. `MEMORY_FILE_PATH` (used when `MEMORY_PROVIDER=file`, default `./data/memory-core.json`)
 5. `MEMORY_CORE_API_KEYS` (comma-separated API keys; if set, `/v1/*` requires auth)
 6. `MEMORY_RATE_LIMIT_PER_MIN` (default `120`)
+7. `MEMORY_PROVIDER=mem0` to enable Mem0 OSS provider
+8. `MEM0_COLLECTION_NAME` (default `memory_core_mem0`)
+9. `MEM0_EMBEDDING_DIMS` (default `256`)
+10. `MEM0_INFER` (`true|false`, default `false`)
 
 Health endpoints:
 1. `GET /health` -> liveness
@@ -190,7 +195,7 @@ await memory.ingest({
 1. Replace direct `UserMemoryService` writes with `ingest`.
 2. Before building `AgentContext`, call `profile` or `context`.
 3. Keep `LangChainMemoryService` for thread history, but use memory-core for cross-thread actor memory.
-4. See `docs/MAITRIX_INTEGRATION_PLAN.md` for a concrete migration split.
+4. See `docs/INTEGRATION_GUIDE.md` for a concrete migration split.
 
 ## Next steps
 
@@ -200,5 +205,15 @@ await memory.ingest({
 4. Add event ingestion queue for durability.
 5. Add tracing dashboards and latency SLO alerts.
 
-Production checklist and parity criteria are documented in:
-- `docs/PRODUCTION_READINESS_PLAN.md`
+Docs index:
+- `docs/README.md`
+
+Production checklist and parity criteria:
+- `docs/PRODUCTION_READINESS.md`
+- `docs/WORKING_OVERVIEW.md`
+
+Integration references:
+- `docs/INTEGRATION_GUIDE.md`
+
+Benchmarking guide:
+- `docs/BENCHMARKS.md`
