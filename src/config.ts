@@ -5,7 +5,7 @@ import type { MemoryProviderKind } from "./providers/factory.js";
 const envSchema = z.object({
   PORT: z.string().optional(),
   HOST: z.string().optional(),
-  MEMORY_PROVIDER: z.enum(["in-memory", "file"]).optional(),
+  MEMORY_PROVIDER: z.enum(["in-memory", "file", "enhanced"]).optional(),
   MEMORY_FILE_PATH: z.string().optional(),
   MEMORY_CORE_API_KEYS: z.string().optional(),
   MEMORY_RATE_LIMIT_PER_MIN: z.string().optional(),
