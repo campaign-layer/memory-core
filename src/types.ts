@@ -6,7 +6,9 @@ export type MemoryType =
   | "episode"
   | "tool_outcome"
   | "instruction"
-  | "profile";
+  | "profile"
+  | "pattern"
+  | "summary";
 
 export type MemoryScope =
   | "thread"
@@ -28,12 +30,14 @@ export interface MemorySource {
   sourceType: string;
   sourceId?: string | null;
   sourceSessionId?: string | null;
+  metadata?: Record<string, any>;
 }
 
 export interface MemoryFeedbackStats {
   selectedCount: number;
   positiveCount: number;
   negativeCount: number;
+  accessCount?: number;
 }
 
 export interface MemoryRecord {
@@ -80,6 +84,12 @@ export interface MemoryIngestRequest {
   observations: MemoryObservation[];
 }
 
+export interface MemoryIngestResponse {
+  success: boolean;
+  recordsCreated: number;
+  recordsUpdated: number;
+}
+
 export interface MemoryFilters {
   tenantId: string;
   appId: string;
@@ -95,6 +105,19 @@ export interface MemorySearchQuery {
   filters: MemoryFilters;
   limit?: number;
   minScore?: number;
+}
+
+export interface MemorySearchRequest {
+  query: string;
+  filters: MemoryFilters;
+  limit?: number;
+  minScore?: number;
+}
+
+export interface MemorySearchResponse {
+  hits: MemorySearchHit[];
+  totalCount: number;
+  processingTime: number;
 }
 
 export interface MemorySearchHit {
@@ -122,6 +145,9 @@ export interface ContextBuildResult {
     reasons: string[];
   }>;
   contextText: string;
+  totalMemories: number;
+  processingTime: number;
+  actorProfile?: string;
 }
 
 export interface MemoryFeedbackInput {

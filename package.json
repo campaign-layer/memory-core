@@ -7,8 +7,10 @@
   "engines": {
     "node": ">=18"
   },
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test src/service.test.ts"

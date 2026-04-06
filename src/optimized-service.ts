@@ -113,13 +113,9 @@ export class OptimizedMemoryCoreService {
       this.updateResponseTime(responseTime);
       
       return {
-        records,
-        metadata: {
-          processedCount: records.length,
-          contradictionsDetected: contradictions.length,
-          cacheInvalidated: true,
-          processingTime: responseTime
-        }
+        success: true,
+        recordsCreated: records.length,
+        recordsUpdated: 0
       };
       
     } catch (error) {
@@ -148,11 +144,8 @@ export class OptimizedMemoryCoreService {
       
       const response: MemorySearchResponse = {
         hits,
-        metadata: {
-          totalFound: hits.length,
-          cached: false,
-          processingTime: Date.now() - startTime
-        }
+        totalCount: hits.length,
+        processingTime: Date.now() - startTime
       };
       
       // Cache the result
@@ -206,6 +199,7 @@ export class OptimizedMemoryCoreService {
         : null;
 
       const result: ContextBuildResult = {
+        profileSummary: profile || "No profile available",
         contextText,
         selectedMemories: selected.map(hit => ({
           id: hit.memory.id,
@@ -215,13 +209,8 @@ export class OptimizedMemoryCoreService {
           reasons: hit.reasons,
         })),
         actorProfile: profile,
-        metadata: {
-          totalCandidates: searchHits.length,
-          selectedCount: selected.length,
-          contextChars: contextText.length,
-          processingTime: Date.now() - startTime,
-          cached: false
-        }
+        totalMemories: searchHits.length,
+        processingTime: Date.now() - startTime
       };
       
       // Cache the result

@@ -1,12 +1,5 @@
-import type {
-  MemoryProvider,
-  MemoryRecord,
-  MemorySearchQuery,
-  MemorySearchHit,
-  MemoryFeedbackInput,
-  MemoryCompactResult,
-} from "../provider.js";
-import type { MemoryIngestRequest } from "../types.js";
+import type { MemoryProvider, ContextBuildParams, HealthStatus } from "../provider.js";
+import type { MemoryRecord, MemorySearchQuery, MemorySearchHit, MemoryFeedbackInput, MemoryCompactResult, MemoryObservation, ContextBuildResult } from "../types.js";
 
 // Inspired by AWS Bedrock AgentCore Memory architecture
 interface ShortTermEvent {
@@ -113,7 +106,7 @@ Focus on: main topics discussed, decisions made, problems solved, next steps.`,
         tenantId: record.tenantId,
         appId: record.appId,
         actorId: record.actorId,
-        sessionId: record.threadId,
+        sessionId: record.threadId || 'default',
         timestamp: new Date(),
         type: 'conversational',
         role: record.source?.metadata?.role || 'user',
@@ -486,15 +479,24 @@ Focus on: main topics discussed, decisions made, problems solved, next steps.`,
       appId: insight.appId,
       actorId: insight.actorId,
       threadId: 'long_term',
+      scope: 'actor',
       memoryType: insight.type,
       text: insight.content,
       summary: `${insight.type}: ${insight.content.substring(0, 100)}...`,
-      createdAt: insight.lastUpdated,
-      lastSeenAt: insight.lastUpdated,
+      metadata: {},
       confidence: insight.confidence,
       importance: insight.importance,
       status: 'active',
-      stats: { positiveCount: 0, negativeCount: 0, accessCount: 0 }
+      source: {
+        sourceType: 'dual_layer_insight',
+        sourceId: insight.id
+      },
+      decayPolicy: { kind: 'none' },
+      firstSeenAt: insight.lastUpdated.toISOString(),
+      lastSeenAt: insight.lastUpdated.toISOString(),
+      createdAt: insight.lastUpdated.toISOString(),
+      updatedAt: insight.lastUpdated.toISOString(),
+      stats: { selectedCount: 0, positiveCount: 0, negativeCount: 0, accessCount: 0 }
     };
   }
 
@@ -505,16 +507,24 @@ Focus on: main topics discussed, decisions made, problems solved, next steps.`,
       appId: event.appId,
       actorId: event.actorId,
       threadId: event.sessionId,
+      scope: 'thread',
       memoryType: 'episode',
       text: event.content,
       summary: event.content.substring(0, 100) + '...',
-      createdAt: event.timestamp,
-      lastSeenAt: event.timestamp,
+      metadata: event.metadata,
       confidence: 0.8,
       importance: 0.6,
       status: 'active',
-      stats: { positiveCount: 0, negativeCount: 0, accessCount: 0 },
-      metadata: event.metadata
+      source: {
+        sourceType: 'dual_layer_event',
+        sourceId: event.id
+      },
+      decayPolicy: { kind: 'time', ttlDays: 7 },
+      firstSeenAt: event.timestamp.toISOString(),
+      lastSeenAt: event.timestamp.toISOString(),
+      createdAt: event.timestamp.toISOString(),
+      updatedAt: event.timestamp.toISOString(),
+      stats: { selectedCount: 0, positiveCount: 0, negativeCount: 0, accessCount: 0 }
     };
   }
 

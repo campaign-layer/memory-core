@@ -159,6 +159,8 @@ export class MemoryCoreService {
       tool_outcome: [] as string[],
       instruction: [] as string[],
       profile: [] as string[],
+      pattern: [] as string[],
+      summary: [] as string[],
     };
 
     for (const record of records) {
@@ -240,6 +242,8 @@ export class MemoryCoreService {
       profileSummary: profile.summary,
       selectedMemories: selected,
       contextText: lines.join("\n").trim(),
+      totalMemories: selected.length,
+      processingTime: Date.now() - Date.now(), // placeholder
     };
   }
 
