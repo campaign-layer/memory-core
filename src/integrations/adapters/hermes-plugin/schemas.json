@@ -1,0 +1,210 @@
+[
+  {
+    "name": "remember",
+    "description": "Store something in long-term memory that will still matter in a future, unrelated session. Call it the moment you learn it: stated preferences, decisions and their reasons, constraints, role/identity, project and repo layout, standing instructions, expensive tool results. Do NOT store: transient chatter, anything already in the current prompt, your own reasoning, secrets, credentials, or a guess you have not confirmed. One fact per call. Write it so it makes sense with zero context: 'Alex deploys with pnpm, never npm', not 'they prefer that'. Exact duplicates are merged server-side, so calling when unsure is cheap.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "description": "The fact, stated so it stands alone with no surrounding context.",
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 1000
+        },
+        "type": {
+          "description": "fact=stable truth, preference=how they like things done, goal=what they are trying to achieve, project=repo/system detail, instruction=standing order to follow, tool_outcome=result worth not rediscovering, episode=notable event.",
+          "type": "string",
+          "enum": [
+            "fact",
+            "preference",
+            "goal",
+            "project",
+            "episode",
+            "instruction",
+            "tool_outcome"
+          ],
+          "default": "fact"
+        },
+        "importance": {
+          "description": "0.9 for load-bearing constraints, 0.5 default, 0.2 for trivia.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.5
+        },
+        "scope": {
+          "description": "actor=remember across all sessions (default), thread=this conversation only, workspace=shared with the team.",
+          "type": "string",
+          "enum": [
+            "thread",
+            "actor",
+            "workspace"
+          ],
+          "default": "actor"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "recall",
+    "description": "Search long-term memory before you answer, guess, or ask the user to repeat themselves. Use it whenever the answer could depend on earlier sessions - preferences, past decisions, project details, or any 'as I mentioned' reference. Query with the topic in plain words, not keywords. Returns ranked memories with an id, score, and why each matched; pass those ids to feedback, forget, or supersede. An empty result means nothing is stored: say so instead of inventing a memory.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "description": "What you want to know, in plain words.",
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 500
+        },
+        "limit": {
+          "description": "Max memories to return.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 6
+        },
+        "types": {
+          "description": "Restrict to these memory types. Omit to search everything.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "fact",
+              "preference",
+              "goal",
+              "project",
+              "episode",
+              "instruction",
+              "tool_outcome"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 7
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "build_context",
+    "description": "Return one token-budgeted memory block, ready to paste into your system prompt before you generate. Prefer this over recall at the start of a turn: it merges the actor's profile with the memories most relevant to the request and trims to a character budget. Use recall instead when you need individual ids and scores to act on.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "description": "The user's current request or topic.",
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 500
+        },
+        "maxItems": {
+          "description": "Max memories in the block.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30,
+          "default": 8
+        },
+        "maxChars": {
+          "description": "Hard character budget.",
+          "type": "integer",
+          "minimum": 300,
+          "maximum": 20000,
+          "default": 3000
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "forget",
+    "description": "Mark a stored memory as wrong so it stops being recalled. Use when the user contradicts or corrects something memory returned and there is no replacement value. Needs the memory id from recall or build_context. If you know the new value, call supersede instead - do not forget then remember.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "memoryId": {
+          "description": "id from a previous recall or build_context result.",
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "description": "Why it is wrong. Short.",
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "memoryId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "supersede",
+    "description": "Replace an outdated memory with its current value in one step: the old memory stops being recalled and the new text is stored in its place, keeping the original type and scope. Use when a fact changed rather than was never true - moved city, switched framework, new title, revised deadline. Needs the old memory id from recall.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "memoryId": {
+          "description": "id of the outdated memory, from recall.",
+          "type": "string",
+          "minLength": 1
+        },
+        "newText": {
+          "description": "The current value, stated so it stands alone.",
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 1000
+        },
+        "reason": {
+          "description": "What changed. Short.",
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "memoryId",
+        "newText"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "feedback",
+    "description": "Report whether a recalled memory actually helped, so ranking improves for next time. Fire-and-forget and cheap; send it right after you use or discard a recall result. This only adjusts ranking - to fix a wrong fact use forget or supersede.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "memoryId": {
+          "description": "id from a previous recall or build_context result.",
+          "type": "string",
+          "minLength": 1
+        },
+        "signal": {
+          "description": "used=you put it in your answer, useful=correct and relevant, not_useful=irrelevant or misleading.",
+          "type": "string",
+          "enum": [
+            "used",
+            "useful",
+            "not_useful"
+          ]
+        }
+      },
+      "required": [
+        "memoryId",
+        "signal"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

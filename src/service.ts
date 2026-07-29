@@ -50,6 +50,22 @@ function normalizeRecord(record: MemoryRecord): MemoryRecord {
   };
 }
 
+// Every MemoryType gets a bucket, so callers can index byType without a presence check.
+function emptyByType(): Record<MemoryType, string[]> {
+  return {
+    fact: [],
+    preference: [],
+    goal: [],
+    project: [],
+    episode: [],
+    tool_outcome: [],
+    instruction: [],
+    profile: [],
+    pattern: [],
+    summary: [],
+  };
+}
+
 function buildProfileSummary(byType: Record<MemoryType, string[]>): string {
   const ordered: Array<[MemoryType, string]> = [
     ["preference", "Preferences"],
@@ -58,6 +74,8 @@ function buildProfileSummary(byType: Record<MemoryType, string[]>): string {
     ["fact", "Facts"],
     ["instruction", "Instructions"],
     ["profile", "Profile"],
+    ["pattern", "Patterns"],
+    ["summary", "Summaries"],
     ["tool_outcome", "Tool Outcomes"],
     ["episode", "Episodes"],
   ];
@@ -150,21 +168,11 @@ export class MemoryCoreService {
   async getProfile(tenantId: string, appId: string, actorId: string): Promise<MemoryProfile> {
     const records = await this.provider.listByActor(tenantId, appId, actorId);
 
-    const byType = {
-      fact: [] as string[],
-      preference: [] as string[],
-      goal: [] as string[],
-      project: [] as string[],
-      episode: [] as string[],
-      tool_outcome: [] as string[],
-      instruction: [] as string[],
-      profile: [] as string[],
-      pattern: [] as string[],
-      summary: [] as string[],
-    };
+    const byType = emptyByType();
 
     for (const record of records) {
-      byType[record.memoryType].push(record.text);
+      // Tolerate a provider returning a type outside the union rather than throwing.
+      (byType[record.memoryType] ??= []).push(record.text);
     }
 
     return {
@@ -178,6 +186,8 @@ export class MemoryCoreService {
   }
 
   async buildContext(request: ContextBuildRequest): Promise<ContextBuildResult> {
+    // performance.now() so sub-millisecond builds report a real duration.
+    const startedAt = performance.now();
     const maxItems = Math.min(Math.max(request.budget?.maxItems ?? 8, 1), 30);
     const maxChars = Math.min(Math.max(request.budget?.maxChars ?? 3000, 300), 20000);
     const hits = await this.search({
@@ -210,16 +220,7 @@ export class MemoryCoreService {
           tenantId: request.filters.tenantId,
           appId: request.filters.appId,
           actorId: "",
-          byType: {
-            fact: [],
-            preference: [],
-            goal: [],
-            project: [],
-            episode: [],
-            tool_outcome: [],
-            instruction: [],
-            profile: [],
-          },
+          byType: emptyByType(),
           summary: "",
           count: 0,
         };
@@ -243,7 +244,7 @@ export class MemoryCoreService {
       selectedMemories: selected,
       contextText: lines.join("\n").trim(),
       totalMemories: selected.length,
-      processingTime: Date.now() - Date.now(), // placeholder
+      processingTime: Math.round((performance.now() - startedAt) * 1000) / 1000,
     };
   }
 

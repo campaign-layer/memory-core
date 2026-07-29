@@ -13,6 +13,11 @@ export * from "./config.js";
 export * from "./providers/factory.js";
 export * from "./providers/in-memory-provider.js";
 export * from "./providers/file-provider.js";
+export * from "./providers/enhanced-provider.js";
+export * from "./providers/dual-layer-provider.js";
+export * from "./providers/postgres-provider.js";
+export * from "./retrieval/index.js";
+export * from "./integrations/index.js";
 
 interface CreateMemoryCoreOptions {
   provider?: MemoryProvider;
@@ -23,6 +28,9 @@ export function createMemoryCoreFromConfig(config: MemoryCoreConfig) {
   const provider = createMemoryProvider({
     kind: config.providerKind,
     filePath: config.filePath,
+    postgresUrl: config.postgresUrl,
+    autoMigrate: config.postgresAutoMigrate,
+    embeddingModel: config.embeddingModel,
   });
   const service = new MemoryCoreService(provider);
   const app = createMemoryCoreApp(service, {
@@ -37,6 +45,9 @@ export function createDefaultMemoryCore(options: CreateMemoryCoreOptions = {}) {
   const provider = options.provider || createMemoryProvider({
     kind: config.providerKind,
     filePath: config.filePath,
+    postgresUrl: config.postgresUrl,
+    autoMigrate: config.postgresAutoMigrate,
+    embeddingModel: config.embeddingModel,
   });
   const service = new MemoryCoreService(provider);
   const app = createMemoryCoreApp(service, {

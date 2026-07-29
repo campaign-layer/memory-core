@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { MemoryProvider } from "../provider.js";
+import type { MemoryIdScope, MemoryProvider } from "../provider.js";
 import type {
   MemoryCompactResult,
   MemoryFeedbackInput,
@@ -19,13 +19,19 @@ const STORE_VERSION = 1;
 
 export class FileProvider implements MemoryProvider {
   private readonly inner = new InMemoryProvider();
-  private loaded = false;
-  private persistQueue: Promise<void> = Promise.resolve();
+  private loading: Promise<void> | null = null;
+  private pendingPersist: Promise<void> | null = null;
+  private dirty = false;
 
   constructor(private readonly filePath: string) {}
 
-  private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return;
+  // Single-flight, so concurrent first requests cannot double-load or race a write.
+  private ensureLoaded(): Promise<void> {
+    this.loading ??= this.load();
+    return this.loading;
+  }
+
+  private async load(): Promise<void> {
     const dir = path.dirname(this.filePath);
     await fs.mkdir(dir, { recursive: true });
 
@@ -38,11 +44,12 @@ export class FileProvider implements MemoryProvider {
       await this.inner.ingest(parsed.records);
     } catch (error) {
       const isNotFound = (error as NodeJS.ErrnoException).code === "ENOENT";
-      if (!isNotFound) throw error;
+      if (!isNotFound) {
+        this.loading = null; // let a caller retry a transient read failure
+        throw error;
+      }
       await this.persist();
     }
-
-    this.loaded = true;
   }
 
   private async persist(): Promise<void> {
@@ -56,16 +63,37 @@ export class FileProvider implements MemoryProvider {
     await fs.rename(tmpPath, this.filePath);
   }
 
-  private async queuePersist(): Promise<void> {
-    this.persistQueue = this.persistQueue.then(() => this.persist());
-    await this.persistQueue;
+  /**
+   * Coalesces writes. A full snapshot is O(N) to serialize, so N writes in the
+   * same tick collapse into one file write instead of N. Still resolves only
+   * after the caller's data is on disk, so durability is unchanged.
+   */
+  private queuePersist(): Promise<void> {
+    this.dirty = true;
+    if (this.pendingPersist) return this.pendingPersist;
+
+    this.pendingPersist = (async () => {
+      try {
+        await Promise.resolve(); // let same-tick writes join this batch
+        while (this.dirty) {
+          this.dirty = false;
+          await this.persist();
+        }
+      } finally {
+        this.pendingPersist = null;
+      }
+    })();
+
+    return this.pendingPersist;
   }
 
-  private async persistIfCompacted(): Promise<void> {
-    const compacted = await this.inner.compact();
-    if (compacted.archivedExpired > 0 || compacted.archivedSuperseded > 0) {
-      await this.queuePersist();
-    }
+  /** Waits for any in-flight snapshot to reach disk. */
+  async flush(): Promise<void> {
+    if (this.pendingPersist) await this.pendingPersist;
+  }
+
+  async close(): Promise<void> {
+    await this.flush();
   }
 
   async ingest(records: MemoryRecord[]): Promise<MemoryRecord[]> {
@@ -77,7 +105,6 @@ export class FileProvider implements MemoryProvider {
 
   async findDuplicate(candidate: MemoryRecord): Promise<MemoryRecord | null> {
     await this.ensureLoaded();
-    await this.persistIfCompacted();
     return this.inner.findDuplicate(candidate);
   }
 
@@ -90,20 +117,17 @@ export class FileProvider implements MemoryProvider {
 
   async search(query: MemorySearchQuery): Promise<MemorySearchHit[]> {
     await this.ensureLoaded();
-    await this.persistIfCompacted();
     return this.inner.search(query);
   }
 
   async listByActor(tenantId: string, appId: string, actorId: string): Promise<MemoryRecord[]> {
     await this.ensureLoaded();
-    await this.persistIfCompacted();
     return this.inner.listByActor(tenantId, appId, actorId);
   }
 
-  async getById(id: string): Promise<MemoryRecord | null> {
+  async getById(id: string, scope?: MemoryIdScope): Promise<MemoryRecord | null> {
     await this.ensureLoaded();
-    await this.persistIfCompacted();
-    return this.inner.getById(id);
+    return this.inner.getById(id, scope);
   }
 
   async applyFeedback(feedback: MemoryFeedbackInput): Promise<MemoryRecord | null> {

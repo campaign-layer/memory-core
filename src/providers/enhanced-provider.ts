@@ -1,4 +1,4 @@
-import type { MemoryProvider } from "../provider.js";
+import type { MemoryIdScope, MemoryProvider } from "../provider.js";
 import type {
   MemoryCompactResult,
   MemoryFeedbackInput,
@@ -6,6 +6,7 @@ import type {
   MemoryRecord,
   MemorySearchHit,
   MemorySearchQuery,
+  MemoryType,
 } from "../types.js";
 import { isExpired, normalizeText, tokenize } from "../utils.js";
 
@@ -19,15 +20,19 @@ interface EnhancedMemoryRecord extends MemoryRecord {
     isTemporallyRelevant?: boolean;
   };
   entityMetadata?: {
-    extractedEntities?: Array<{
-      text: string;
-      type: 'PERSON' | 'PLACE' | 'OBJECT' | 'EVENT' | 'TIME' | 'PROBLEM';
-      confidence: number;
-    }>;
+    extractedEntities?: ExtractedEntity[];
     hasProblemLanguage?: boolean;
-    hasDeviceMentions?: boolean;
   };
   episodeId?: string; // Groups related memories
+}
+
+// Structural entity kinds. Driven by general patterns only - no domain word lists.
+type EntityType = 'PROPER_NOUN' | 'ACRONYM' | 'IDENTIFIER' | 'QUOTED' | 'NUMBER' | 'TIME' | 'PROBLEM';
+
+interface ExtractedEntity {
+  text: string;
+  type: EntityType;
+  confidence: number;
 }
 
 // Simple embedding service interface (would use actual embeddings in production)
@@ -239,14 +244,13 @@ export class EnhancedMemoryProvider implements MemoryProvider {
             temporalOrder,
           };
           
-          // Enhanced entity extraction with problem detection
-          const entities = this.extractSimpleEntities(record.text);
+          // Structural entity extraction
+          const entities = this.extractEntities(record.text);
           enhanced.entityMetadata = {
             extractedEntities: entities,
             hasProblemLanguage: entities.some(e => e.type === 'PROBLEM'),
-            hasDeviceMentions: entities.some(e => e.type === 'OBJECT'),
           };
-          
+
         } catch (error) {
           console.warn(`Failed to enhance record ${record.id}:`, error);
         }
@@ -263,53 +267,84 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     return enhancedRecords;
   }
   
-  private extractSimpleEntities(text: string): Array<{
-    text: string;
-    type: 'PERSON' | 'PLACE' | 'OBJECT' | 'EVENT' | 'TIME' | 'PROBLEM';
-    confidence: number;
-  }> {
-    const entities: Array<{
-      text: string;
-      type: 'PERSON' | 'PLACE' | 'OBJECT' | 'EVENT' | 'TIME' | 'PROBLEM';
-      confidence: number;
-    }> = [];
-    
-    // Enhanced pattern-based entity extraction (from successful Python logic)
-    const patterns = [
-      // Devices and products (high confidence for LongMemEval)
-      { pattern: /\b(GPS|Samsung|Galaxy|S22|Dell|XPS|13|iPhone|iPad|MacBook|Toyota|Honda|Civic|Corolla)\b/gi, type: 'OBJECT' as const, confidence: 0.9 },
-      { pattern: /\b(bike|car|vehicle|laptop|phone|smartphone|tablet)\b/gi, type: 'OBJECT' as const, confidence: 0.8 },
-      
-      // Events and activities
-      { pattern: /\b(service|appointment|meeting|workshop|webinar|festival|mass|church|Effective Communication|Data Analysis|Time Management)\b/gi, type: 'EVENT' as const, confidence: 0.9 },
-      
-      // Temporal indicators
-      { pattern: /\b(March|February|January|April|May|June|July|August|September|October|November|December)\b/gi, type: 'TIME' as const, confidence: 0.8 },
-      { pattern: /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b/gi, type: 'TIME' as const, confidence: 0.7 },
-      { pattern: /\b(yesterday|today|tomorrow|ago|later|first|last|before|after)\b/gi, type: 'TIME' as const, confidence: 0.6 },
-      
-      // Problems and issues (critical for "first issue" questions)
-      { pattern: /\b(issue|problem|trouble|malfunction|not working|broken|failed|error)\b/gi, type: 'PROBLEM' as const, confidence: 0.9 },
-      
-      // People and places
-      { pattern: /\b(Rachel|John|Mary|Mike|Sarah|David)\b/gi, type: 'PERSON' as const, confidence: 0.8 },
-      { pattern: /\b(Yellowstone|Hawaii|Virginia|California|New York|St\. Mary\'s|cathedral)\b/gi, type: 'PLACE' as const, confidence: 0.8 },
-    ];
-    
-    for (const { pattern, type, confidence } of patterns) {
-      const matches = text.match(pattern);
-      if (matches) {
-        for (const match of matches) {
-          entities.push({
-            text: match,
-            type,
-            confidence,
-          });
-        }
-      }
+  // General structural entity extraction: proper-noun runs, acronyms, alphanumeric
+  // identifiers, quoted spans, numbers, calendar/relative time and problem language.
+  private extractEntities(text: string): ExtractedEntity[] {
+    const entities: ExtractedEntity[] = [];
+    const seen = new Set<string>();
+
+    const push = (value: string, type: EntityType, confidence: number) => {
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      const key = `${type}:${trimmed.toLowerCase()}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      entities.push({ text: trimmed, type, confidence });
+    };
+
+    // Quoted spans are explicit author-marked entities.
+    for (const match of text.matchAll(/["'‘’“”]([^"'‘’“”]{2,80})["'‘’“”]/g)) {
+      push(match[1], 'QUOTED', 0.9);
     }
-    
+
+    for (const properNoun of this.extractProperNounRuns(text)) {
+      push(properNoun, 'PROPER_NOUN', 0.7);
+    }
+
+    // Acronyms (runs of capitals) and model-style identifiers (letters then digits).
+    for (const match of text.matchAll(/\b\p{Lu}{2,}\b/gu)) push(match[0], 'ACRONYM', 0.7);
+    for (const match of text.matchAll(/\b\p{L}+\p{N}[\p{L}\p{N}]*\b/gu)) push(match[0], 'IDENTIFIER', 0.7);
+
+    for (const match of text.matchAll(/\b\d+(?:[.,]\d+)*\b/g)) push(match[0], 'NUMBER', 0.5);
+
+    const timePatterns: Array<[RegExp, number]> = [
+      [/\b(?:\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{1,2}-\d{1,2})\b/g, 0.9],
+      [/\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:uary|ruary|ch|il|e|y|ust|tember|ober|ember)?\b/gi, 0.8],
+      [/\b(?:mon|tues|wednes|thurs|fri|satur|sun)day\b/gi, 0.7],
+      [/\b(?:yesterday|today|tomorrow|ago|later|earlier|first|last|initial|final|before|after|since|until)\b/gi, 0.6],
+    ];
+    for (const [pattern, confidence] of timePatterns) {
+      for (const match of text.matchAll(pattern)) push(match[0], 'TIME', confidence);
+    }
+
+    // Generic problem predicates (common English, not domain terms).
+    for (const match of text.matchAll(/\b(?:issue|issues|problem|problems|trouble|malfunction|broken|failed|failing|failure|error|errors|not working)\b/gi)) {
+      push(match[0], 'PROBLEM', 0.8);
+    }
+
     return entities;
+  }
+
+  // Runs of capitalized tokens. A lone sentence-initial capital is skipped because
+  // capitalization there is grammatical, not proper-noun evidence.
+  private extractProperNounRuns(text: string): string[] {
+    const runs: string[] = [];
+
+    for (const sentence of text.split(/(?<=[.!?])\s+/)) {
+      const tokens = sentence.trim().split(/\s+/);
+      let run: string[] = [];
+      let runStartsSentence = false;
+
+      const flush = () => {
+        if (run.length > 1 || (run.length === 1 && !runStartsSentence)) {
+          runs.push(run.join(" "));
+        }
+        run = [];
+      };
+
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+        if (token && /^\p{Lu}[\p{L}\p{N}'\u2019-]*$/u.test(token)) {
+          if (run.length === 0) runStartsSentence = i === 0;
+          run.push(token);
+          continue;
+        }
+        flush();
+      }
+      flush();
+    }
+
+    return runs;
   }
 
   async findDuplicate(candidate: MemoryRecord): Promise<MemoryRecord | null> {
@@ -345,22 +380,18 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     temporalType?: 'sequence' | 'duration' | 'specific_time' | 'relative_time';
     confidence: number;
     entities: string[];
-    isFirstIssue: boolean;
   }> {
     const queryLower = query.toLowerCase();
-    
-    // Enhanced temporal question patterns (based on successful Python logic)
-    const isFirstIssue = /\b(first\s+issue|first\s+problem)\b/.test(queryLower);
+
     const isTemporal = /\b(first|second|third|last|before|after|when|how\s+long|how\s+many\s+days|which.*first)\b/.test(queryLower);
     const isComparative = /\b(which.*or)\b/.test(queryLower) || (/\bwhich\b/.test(queryLower) && /\bor\b/.test(queryLower));
     const isDuration = /\b(how\s+many\s+days|how\s+long)\b/.test(queryLower);
-    
-    // Extract entities from query (key improvement from Python adapter)
+
     const entities = this.extractQueryEntities(query);
-    
-    if (isTemporal || isFirstIssue) {
+
+    if (isTemporal) {
       let temporalType: 'sequence' | 'duration' | 'specific_time' | 'relative_time' = 'sequence';
-      
+
       if (isDuration) {
         temporalType = 'duration';
       } else if (/\b(when|what\s+time|what\s+date)\b/.test(queryLower)) {
@@ -368,49 +399,28 @@ export class EnhancedMemoryProvider implements MemoryProvider {
       } else if (/\b(before|after|since|until)\b/.test(queryLower)) {
         temporalType = 'relative_time';
       }
-      
-      return { type: 'temporal', temporalType, confidence: 0.9, entities, isFirstIssue };
+
+      return { type: 'temporal', temporalType, confidence: 0.9, entities };
     }
-    
-    // Comparative questions (improved detection)
+
     if (isComparative) {
-      return { type: 'comparative', confidence: 0.8, entities, isFirstIssue: false };
+      return { type: 'comparative', confidence: 0.8, entities };
     }
-    
+
     // Preference questions
     if (/\b(prefer|like|favorite|choose|recommendation)\b/.test(queryLower)) {
-      return { type: 'preference', confidence: 0.8, entities, isFirstIssue: false };
+      return { type: 'preference', confidence: 0.8, entities };
     }
-    
-    return { type: 'factual', confidence: 0.6, entities, isFirstIssue: false };
+
+    return { type: 'factual', confidence: 0.6, entities };
   }
 
   private extractQueryEntities(query: string): string[] {
-    const entities: string[] = [];
-    
-    // Extract quoted items (exact matches from Python)
-    const quotedItems = query.match(/'([^']+)'/g);
-    if (quotedItems) {
-      entities.push(...quotedItems.map(item => item.replace(/'/g, '')));
-    }
-    
-    // Extract known device/product patterns
-    const devicePatterns = [
-      /\b(GPS|Samsung|Galaxy|S22|Dell|XPS|13|iPhone|iPad|MacBook|Toyota|Honda|Civic|Corolla)\b/gi,
-      /\b(bike|car|vehicle|laptop|phone|smartphone|tablet)\b/gi,
-      /\b(workshop|webinar|meeting|service|appointment|festival|mass|church)\b/gi,
-      /\b(Time Management|Data Analysis|Python|Effective Communication)\b/gi,
-      /\b(tomatoes|marigolds|seeds)\b/gi
-    ];
-    
-    for (const pattern of devicePatterns) {
-      const matches = query.match(pattern);
-      if (matches) {
-        entities.push(...matches);
-      }
-    }
-    
-    return [...new Set(entities)]; // Remove duplicates
+    // Same general extractor used at ingest time, so query and record entities align.
+    const entities = this.extractEntities(query)
+      .filter((entity) => entity.type !== 'PROBLEM' && entity.type !== 'TIME')
+      .map((entity) => entity.text);
+    return [...new Set(entities)];
   }
 
   async search(query: MemorySearchQuery): Promise<MemorySearchHit[]> {
@@ -488,7 +498,7 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     record: EnhancedMemoryRecord,
     query: string,
     queryEmbedding: number[],
-    queryClassification: { type: string; temporalType?: string; confidence: number; entities: string[]; isFirstIssue: boolean }
+    queryClassification: { type: string; temporalType?: string; confidence: number; entities: string[] }
   ): Promise<{ score: number; reasons: string[] }> {
     const reasons: string[] = [];
     
@@ -532,60 +542,39 @@ export class EnhancedMemoryProvider implements MemoryProvider {
       }
     }
     
-    // Enhanced entity matching boost (based on successful Python logic)
+    // Entity matching boost
     let entityBoost = 0;
-    let problemBoost = 0;
-    
+
     if (record.entityMetadata?.extractedEntities) {
-      // Check for query entity matches
       const queryEntities = queryClassification.entities.map(e => e.toLowerCase());
+      const queryTokens = tokenize(query.toLowerCase());
       const entityMatches = record.entityMetadata.extractedEntities.filter(entity =>
-        queryEntities.includes(entity.text.toLowerCase()) || 
-        tokenize(query.toLowerCase()).includes(entity.text.toLowerCase())
+        queryEntities.includes(entity.text.toLowerCase()) ||
+        queryTokens.includes(entity.text.toLowerCase())
       );
-      
+
       if (entityMatches.length > 0) {
         entityBoost = Math.min(entityMatches.length * 0.15, 0.4);
         reasons.push(`matches ${entityMatches.length} entities: ${entityMatches.map(e => e.text).join(', ')}`);
       }
-      
-      // Special boost for "first issue" questions finding problem entities
-      if (queryClassification.isFirstIssue && record.entityMetadata.hasProblemLanguage) {
-        problemBoost = 0.5; // Huge boost for issue-related memories
-        reasons.push("contains problem/issue language for first issue question");
-        
-        // Extra boost if specific device mentioned (like GPS)
-        const deviceMatches = record.entityMetadata.extractedEntities.filter(e => 
-          e.type === 'OBJECT' && queryEntities.some(qe => qe.includes(e.text.toLowerCase()))
-        );
-        if (deviceMatches.length > 0) {
-          problemBoost += 0.3;
-          reasons.push(`device mentioned in problem context: ${deviceMatches.map(e => e.text).join(', ')}`);
-        }
-      }
     }
-    
-    // Enhanced score calculation with problem boost (based on successful Python logic)
+
     let score: number;
-    
-    if (queryClassification.isFirstIssue) {
-      // Special scoring for "first issue" questions - prioritize problem detection
-      score = problemBoost * 0.4 + semantic * 0.2 + lexical * 0.15 + entityBoost * 0.15 + 
-              temporalBoost * 0.05 + importance * 0.03 + confidence * 0.02 + feedbackBoost;
-    } else if (queryClassification.type === 'temporal') {
-      // For other temporal queries, prioritize temporal relevance and entity matching
-      score = semantic * 0.3 + temporalBoost * 0.25 + entityBoost * 0.2 + lexical * 0.15 + 
+
+    if (queryClassification.type === 'temporal') {
+      // Temporal queries: prioritize temporal relevance and entity matching
+      score = semantic * 0.3 + temporalBoost * 0.25 + entityBoost * 0.2 + lexical * 0.15 +
               recency * 0.05 + confidence * 0.03 + importance * 0.02 + feedbackBoost;
     } else if (queryClassification.type === 'comparative') {
-      // For comparative queries, prioritize entity matching
-      score = entityBoost * 0.4 + semantic * 0.3 + lexical * 0.2 + 
+      // Comparative queries: prioritize entity matching
+      score = entityBoost * 0.4 + semantic * 0.3 + lexical * 0.2 +
               recency * 0.05 + confidence * 0.03 + importance * 0.02 + feedbackBoost;
     } else {
-      // For factual queries, prioritize semantic similarity
-      score = semantic * 0.4 + lexical * 0.25 + entityBoost * 0.2 + 
+      // Factual queries: prioritize semantic similarity
+      score = semantic * 0.4 + lexical * 0.25 + entityBoost * 0.2 +
               recency * 0.08 + confidence * 0.04 + importance * 0.03 + feedbackBoost;
     }
-    
+
     return { score: Math.max(0, Math.min(1, score)), reasons };
   }
 
@@ -620,10 +609,11 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     return list;
   }
 
-  async getById(id: string): Promise<MemoryRecord | null> {
+  async getById(id: string, scope?: MemoryIdScope): Promise<MemoryRecord | null> {
     this.pruneExpired();
     const record = this.records.get(id);
     if (!record || record.status !== "active") return null;
+    if (scope && (record.tenantId !== scope.tenantId || record.appId !== scope.appId)) return null;
     return record;
   }
 
@@ -631,6 +621,9 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     this.pruneExpired();
     const record = this.records.get(feedback.memoryId);
     if (!record || record.status !== "active") return null;
+    // Scope is optional on the input; honour it whenever the caller supplies it.
+    if (feedback.tenantId && record.tenantId !== feedback.tenantId) return null;
+    if (feedback.appId && record.appId !== feedback.appId) return null;
 
     if (feedback.signal === "selected") {
       record.stats.selectedCount += 1;
@@ -651,99 +644,39 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     return { archivedExpired, archivedSuperseded: 0 };
   }
 
-  // Enhanced context building specifically for LongMemEval-style questions
-  async buildEnhancedContext(query: string, filters: any, budget: any): Promise<{
+  // Context building over the enhanced retrieval path. Extractive only: every line
+  // comes from a stored memory, nothing is synthesized.
+  async buildEnhancedContext(query: string, filters: MemoryFilters, budget: { maxItems?: number }): Promise<{
     contextText: string;
-    selectedMemories: any[];
-    intelligentAnswer?: string;
+    selectedMemories: Array<{
+      id: string;
+      memoryType: MemoryType;
+      text: string;
+      score: number;
+      reasons: string[];
+    }>;
   }> {
-    const searchHits = await this.search({
-      query,
-      filters,
-      limit: budget.maxItems || 20
-    });
-    
-    const queryClassification = await this.classifyQuery(query);
-    
-    // Build context with intelligent answer extraction
-    let intelligentAnswer = "";
-    if (searchHits.length > 0) {
-      intelligentAnswer = this.extractIntelligentAnswer(query, queryClassification, searchHits);
-    }
-    
-    // Build traditional context
+    const maxItems = budget?.maxItems ?? 20;
+    const searchHits = await this.search({ query, filters, limit: maxItems });
+
     const contextLines = ["ENHANCED MEMORY SEARCH RESULTS:"];
     const selectedMemories = [];
-    
-    for (const hit of searchHits.slice(0, budget.maxItems || 20)) {
-      const line = `- [${hit.memory.memoryType}] ${hit.memory.text} (score: ${hit.score.toFixed(3)})`;
-      contextLines.push(line);
+
+    for (const hit of searchHits.slice(0, maxItems)) {
+      contextLines.push(`- [${hit.memory.memoryType}] ${hit.memory.text} (score: ${hit.score.toFixed(3)})`);
       selectedMemories.push({
         id: hit.memory.id,
         memoryType: hit.memory.memoryType,
         text: hit.memory.text,
         score: hit.score,
-        reasons: hit.reasons
+        reasons: hit.reasons,
       });
     }
-    
+
     return {
       contextText: contextLines.join('\n'),
       selectedMemories,
-      intelligentAnswer
     };
-  }
-  
-  private extractIntelligentAnswer(query: string, classification: any, hits: any[]): string {
-    if (!hits.length) return "";
-    
-    const queryLower = query.toLowerCase();
-    
-    // Handle "first issue" questions with special logic
-    if (classification.isFirstIssue) {
-      for (const hit of hits) {
-        const memory = hit.memory as EnhancedMemoryRecord;
-        if (memory.entityMetadata?.hasProblemLanguage) {
-          // Look for specific problems mentioned
-          const text = memory.text.toLowerCase();
-          if (text.includes('gps') && (text.includes('issue') || text.includes('problem') || text.includes('not') || text.includes('malfunction'))) {
-            return "GPS system not functioning correctly";
-          }
-          // Could add other specific issue patterns here
-        }
-      }
-    }
-    
-    // Handle comparative questions
-    if (classification.type === 'comparative' && classification.entities.length >= 2) {
-      for (const hit of hits) {
-        const text = hit.memory.text.toLowerCase();
-        // Look for temporal indicators with entities
-        for (const entity of classification.entities) {
-          if (text.includes(entity.toLowerCase()) && 
-              (text.includes('first') || text.includes('before') || text.includes('initially'))) {
-            return entity;
-          }
-        }
-      }
-      
-      // Fallback to first entity found
-      for (const entity of classification.entities) {
-        for (const hit of hits) {
-          if (hit.memory.text.toLowerCase().includes(entity.toLowerCase())) {
-            return entity;
-          }
-        }
-      }
-    }
-    
-    // For other questions, return best scoring memory content
-    const bestHit = hits[0];
-    if (bestHit.score > 0.3) {
-      return bestHit.memory.text.split('.')[0] + ".";
-    }
-    
-    return "";
   }
 
   async health() {

@@ -153,6 +153,11 @@ export interface ContextBuildResult {
 export interface MemoryFeedbackInput {
   memoryId: string;
   signal: "selected" | "positive" | "negative";
+  /** Tenant scope for the target memory. Optional for backward compatibility;
+   *  providers that support it restrict the update to this scope, and the HTTP
+   *  feedback route requires both so no caller can reach another tenant's row. */
+  tenantId?: string;
+  appId?: string;
 }
 
 export interface MemoryCompactResult {

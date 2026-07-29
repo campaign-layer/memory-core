@@ -1,0 +1,23 @@
+name: memory-core
+version: 0.1.0
+description: Durable cross-session memory via a memory-core service - remember, recall, and correct facts.
+author: Maitrix
+provides_tools:
+  - remember
+  - recall
+  - build_context
+  - forget
+  - supersede
+  - feedback
+requires_env:
+  - description: Base URL of the running memory-core service, e.g. http://127.0.0.1:7401
+    name: MEMORY_CORE_URL
+  - description: API key if the service enforces one
+    name: MEMORY_CORE_API_KEY
+    secret: true
+  - description: Tenant that owns the memories
+    name: MEMORY_TENANT_ID
+  - description: App writing the memories
+    name: MEMORY_APP_ID
+  - description: End user or agent the memories belong to
+    name: MEMORY_ACTOR_ID

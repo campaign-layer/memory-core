@@ -1,0 +1,26 @@
+node_modules/
+dist/
+
+# Local secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Runtime data
+data/
+*.db
+*.db-journal
+
+# Bench run outputs. Dataset fixtures under bench/dataset/generated/ ARE
+# committed on purpose: every published number cites a dataset hash, which is
+# worthless if the corpus it names is not in the repo.
+bench/results/
+bench/out/
+
+# Model cache for local ONNX embeddings
+.cache/
+.models/
+
+# OS / editor
+.DS_Store
+*.log

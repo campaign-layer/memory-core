@@ -20,6 +20,15 @@ export interface HealthStatus {
   details?: Record<string, any>;
 }
 
+/**
+ * Tenant scope for id-addressed reads. Ids are globally unique, so without this
+ * a caller holding an id from another tenant can read or retire that record.
+ */
+export interface MemoryIdScope {
+  tenantId: string;
+  appId: string;
+}
+
 export interface ContextBuildParams {
   query: string;
   filters: MemoryFilters;
@@ -35,10 +44,13 @@ export interface MemoryProvider {
   update(record: MemoryRecord): Promise<MemoryRecord>;
   search(query: MemorySearchQuery): Promise<MemorySearchHit[]>;
   listByActor(tenantId: string, appId: string, actorId: string): Promise<MemoryRecord[]>;
-  getById(id: string): Promise<MemoryRecord | null>;
+  /** Pass `scope` whenever the id came from outside the process. */
+  getById(id: string, scope?: MemoryIdScope): Promise<MemoryRecord | null>;
   applyFeedback(feedback: MemoryFeedbackInput): Promise<MemoryRecord | null>;
   compact(): Promise<MemoryCompactResult>;
   health?(): Promise<ProviderHealthStatus>;
+  /** Releases pools, timers, and pending writes. Called on server shutdown. */
+  close?(): void | Promise<void>;
   
   // Additional methods for new providers
   ingestObservations?(tenantId: string, observations: import('./types.js').MemoryObservation[]): Promise<void>;

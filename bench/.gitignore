@@ -1,0 +1,3 @@
+# Per-run artifacts. The dataset fixtures in dataset/generated/ ARE committed on purpose,
+# so any published number can be traced back to the exact corpus it came from.
+out/

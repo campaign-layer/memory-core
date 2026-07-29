@@ -10,7 +10,9 @@ import { z } from "zod";
 import type { MemoryCoreService } from "./service.js";
 import type { MemoryType } from "./types.js";
 
-const memoryTypeEnum = z.enum([
+// Kept in lockstep with the MemoryType union: `satisfies` rejects unknown members and the
+// assignment below fails to compile if a member is ever added without listing it here.
+const MEMORY_TYPES = [
   "fact",
   "preference",
   "goal",
@@ -19,12 +21,19 @@ const memoryTypeEnum = z.enum([
   "tool_outcome",
   "instruction",
   "profile",
-]);
+  "pattern",
+  "summary",
+] as const satisfies readonly MemoryType[];
+type AssertNever<T extends never> = T;
+type MemoryTypesAreExhaustive = AssertNever<Exclude<MemoryType, (typeof MEMORY_TYPES)[number]>>;
+
+const memoryTypeEnum = z.enum(MEMORY_TYPES);
 
 const sourceSchema = z.object({
   sourceType: z.string().min(1),
-  sourceId: z.string().optional(),
-  sourceSessionId: z.string().optional(),
+  sourceId: z.string().optional().nullable(),
+  sourceSessionId: z.string().optional().nullable(),
+  metadata: z.record(z.unknown()).optional(),
 });
 
 const ingestSchema = z.object({
@@ -81,9 +90,14 @@ const contextSchema = z.object({
     .optional(),
 });
 
+// tenantId/appId are required here even though MemoryFeedbackInput keeps them
+// optional: an unscoped memoryId lets any caller mutate and read back another
+// tenant's row, so the externally reachable surface must always be scoped.
 const feedbackSchema = z.object({
   memoryId: z.string().min(1),
   signal: z.enum(["selected", "positive", "negative"]),
+  tenantId: z.string().min(1),
+  appId: z.string().min(1),
 });
 
 interface HttpAppOptions {

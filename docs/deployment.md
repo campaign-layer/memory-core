@@ -1,594 +1,256 @@
-# Deployment & Configuration Guide
+# Deployment
 
-This guide covers deploying memory-core in various environments with different configurations.
+Running memory-core. Read [`PRODUCTION_READINESS.md`](./PRODUCTION_READINESS.md) first — the
+rate limiter is per-process, API keys are not tenant-scoped, and there is no CI. Nothing here
+has run in production.
 
-## Quick Start
+Earlier revisions of this file documented CORS settings, `LOG_LEVEL`, `NODE_ENV`-driven
+behaviour, winston logging, a `prom-client` `/metrics` endpoint, `FILE_BACKUP_*`,
+`ENHANCED_*`, `DUAL_LAYER_*` variables, and `/v1/memory/export` + `/v1/memory/import` routes.
+**None of those exist.** The lists below are exhaustive.
 
-### Local Development
+## Local
+
 ```bash
-git clone <repository>
-cd memory-core
 npm install
-npm run dev
+npm run dev            # tsx src/server.ts, hot reload, 0.0.0.0:7401
 ```
 
-### Docker (Recommended)
+## Built
+
 ```bash
-docker run -p 7401:7401 memory-core:latest
+npm run build          # tsc -> dist/
+npm start              # node dist/server.js
 ```
 
-### Production
-```bash
-npm run build
-npm start
-```
+`npm run build` compiles `src/**` (tests included — `tsconfig.json` has no test exclusion, so
+`dist/` contains `*.test.js`; they are never imported by the server).
 
-## Environment Configuration
+## Configuration
 
-### Core Settings
+Every environment variable the service reads, from `src/config.ts`. Unknown keys are stripped
+by zod, so a typo is silently ignored — check `/ready` to confirm which provider actually
+started.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `7401` | HTTP server port |
-| `NODE_ENV` | `development` | Environment mode |
-| `MEMORY_PROVIDER` | `in-memory` | Memory provider type |
-| `LOG_LEVEL` | `info` | Logging verbosity |
-| `CORS_ORIGIN` | `*` | CORS allowed origins |
+| Variable | Default | Notes |
+|---|---|---|
+| `PORT` | `7401` | Must be 1–65535 or startup throws. |
+| `HOST` | `0.0.0.0` | |
+| `MEMORY_PROVIDER` | `in-memory` | `in-memory` \| `file` \| `enhanced` \| `dual-layer` \| `postgres`. Anything else fails zod at startup. |
+| `MEMORY_FILE_PATH` | `./data/memory-core.json` | `file` provider only. |
+| `MEMORY_CORE_API_KEYS` | unset | Comma-separated. When set, `/v1/*` requires `x-api-key` or `Authorization: Bearer`. Empty means **no auth**. |
+| `MEMORY_RATE_LIMIT_PER_MIN` | `120` | Must be 10–10000 or startup throws. Per identity, **per process**. |
+| `MEMORY_PG_URL` | dev localhost URL | Postgres connection string. |
+| `DATABASE_URL` | — | Fallback if `MEMORY_PG_URL` is unset. |
+| `MEMORY_PG_AUTO_MIGRATE` | `false` | Exactly the string `"true"` enables it. |
+| `MEMORY_EMBEDDING_MODEL` | unset | **Label only.** Stored beside vectors; does not select a model. |
 
-### Provider-Specific Settings
+The MCP server reads a separate set (`MEMORY_TENANT_ID`, `MEMORY_APP_ID`, `MEMORY_ACTOR_ID`,
+`MEMORY_CORE_URL`, `MEMORY_CORE_API_KEY`, `MEMORY_CORE_MODE`, `MEMORY_THREAD_ID`,
+`MEMORY_SOURCE_TYPE`) — see [`src/integrations/README.md`](../src/integrations/README.md).
 
-#### File Provider
-```bash
-export MEMORY_PROVIDER=file
-export MEMORY_FILE_PATH=./data/memories.json
-export FILE_BACKUP_ENABLED=true
-export FILE_BACKUP_INTERVAL=300000  # 5 minutes
-```
+`VOYAGE_API_KEY` and `OPENAI_API_KEY` are read only by the corresponding embedder classes,
+which the env-driven server path never constructs.
 
-#### Enhanced Provider
-```bash
-export MEMORY_PROVIDER=enhanced
-export ENHANCED_SIMILARITY_THRESHOLD=0.05
-export ENHANCED_MAX_RESULTS=50
-export ENHANCED_ENABLE_CACHING=true
-export ENHANCED_CACHE_TTL=600000  # 10 minutes
-```
+## Docker
 
-#### Dual-Layer Provider
-```bash
-export MEMORY_PROVIDER=dual-layer
-export DUAL_LAYER_MAX_EVENTS=1000
-export DUAL_LAYER_MAX_INSIGHTS=500
-export DUAL_LAYER_PROCESSING_INTERVAL=30000  # 30 seconds
-export DUAL_LAYER_STRATEGIES=semantic,preference,summary
-export DUAL_LAYER_EVENT_TTL=7200000  # 2 hours
-```
-
-## Docker Deployment
-
-### Basic Setup
-
-**Dockerfile**:
-```dockerfile
-FROM node:18-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
-COPY . .
-RUN npm run build
-EXPOSE 7401
-CMD ["npm", "start"]
-```
-
-**Build and Run**:
 ```bash
 docker build -t memory-core .
-docker run -d \
-  --name memory-core \
-  -p 7401:7401 \
+docker run -p 7401:7401 memory-core
+
+# file persistence (the image pre-creates /app/data owned by the node user)
+docker run -p 7401:7401 \
   -e MEMORY_PROVIDER=file \
-  -e MEMORY_FILE_PATH=/data/memories.json \
-  -v $(pwd)/data:/data \
+  -e MEMORY_FILE_PATH=/app/data/memory-core.json \
+  -v "$(pwd)/data:/app/data" \
+  memory-core
+
+# postgres
+docker run -p 7401:7401 \
+  -e MEMORY_PROVIDER=postgres \
+  -e MEMORY_PG_URL='postgres://user:pw@host:5432/memory_core' \
+  -e MEMORY_PG_AUTO_MIGRATE=true \
   memory-core
 ```
 
-### Docker Compose
+The `Dockerfile` is three stages:
 
-**docker-compose.yml**:
+1. **build** — `npm ci` with devDependencies, then `npm run build`. tsc is a devDependency, so
+   this stage must have them.
+2. **prod-deps** — `npm ci --omit=dev` in a clean stage, so no `typescript`, `tsx` or
+   `@types/express` reaches the runtime image.
+3. **runtime** — `node:22-bookworm-slim` holding only `dist/`, production `node_modules`,
+   `package.json` and `migrations/`. Unprivileged `node` user, `/app/data` pre-created and
+   chowned, a `HEALTHCHECK` using node's global `fetch` (no curl in the image), and an
+   exec-form `CMD ["node", "dist/server.js"]` so SIGTERM reaches the process rather than being
+   swallowed by npm.
+
+Two things that are load-bearing:
+
+- **`migrations/` must ship.** `PostgresMemoryProvider` resolves the migration file relative to
+  its own compiled location (`dist/providers/../../migrations/001_init.sql`). Drop the COPY and
+  `MEMORY_PG_AUTO_MIGRATE=true` fails at runtime.
+- **The base is Debian, not Alpine.** `@huggingface/transformers` is a runtime dependency and
+  pulls in `onnxruntime-node` and `sharp`, whose prebuilt binaries are glibc-linked. On
+  musl they install and then fail at require time.
+
+The previous Dockerfile could not build at all: it ran `npm ci --only=production` and then
+`npm run build`, with `typescript`, `@types/node` and `@types/express` in devDependencies.
+
+### docker-compose
+
 ```yaml
-version: '3.8'
-
 services:
   memory-core:
     build: .
-    ports:
-      - "7401:7401"
+    ports: ["7401:7401"]
     environment:
-      - NODE_ENV=production
-      - MEMORY_PROVIDER=dual-layer
-      - LOG_LEVEL=info
-    volumes:
-      - ./data:/data
-      - ./logs:/app/logs
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7401/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # Optional: Add reverse proxy
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
-      - ./ssl:/etc/nginx/ssl
+      MEMORY_PROVIDER: postgres
+      MEMORY_PG_URL: postgres://memory:memory@db:5432/memory_core
+      MEMORY_PG_AUTO_MIGRATE: "true"
+      MEMORY_CORE_API_KEYS: ${MEMORY_CORE_API_KEYS}
     depends_on:
-      - memory-core
+      db: { condition: service_healthy }
     restart: unless-stopped
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: memory
+      POSTGRES_PASSWORD: memory
+      POSTGRES_DB: memory_core
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:
 ```
 
-**Run with Compose**:
-```bash
-docker-compose up -d
-```
+`pgvector/pgvector:pg16` ships the extension. On a plain `postgres` image the migration raises
+a notice and vector search stays disabled while full-text search keeps working.
 
-## Kubernetes Deployment
+## Kubernetes
 
-### Basic Deployment
+Only `MEMORY_PROVIDER=postgres` is safe with `replicas > 1`. The other four providers are
+process-local; `file` will corrupt under two writers.
 
-**deployment.yaml**:
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: memory-core
-  labels:
-    app: memory-core
 spec:
   replicas: 3
   selector:
-    matchLabels:
-      app: memory-core
+    matchLabels: { app: memory-core }
   template:
     metadata:
-      labels:
-        app: memory-core
+      labels: { app: memory-core }
     spec:
       containers:
       - name: memory-core
         image: memory-core:latest
-        ports:
-        - containerPort: 7401
+        ports: [{ containerPort: 7401 }]
         env:
-        - name: NODE_ENV
-          value: "production"
-        - name: MEMORY_PROVIDER
-          value: "dual-layer"
-        - name: PORT
-          value: "7401"
+        - { name: MEMORY_PROVIDER, value: "postgres" }
+        - name: MEMORY_PG_URL
+          valueFrom: { secretKeyRef: { name: memory-core-secrets, key: pg-url } }
+        - name: MEMORY_CORE_API_KEYS
+          valueFrom: { secretKeyRef: { name: memory-core-secrets, key: api-keys } }
         resources:
-          requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
+          requests: { memory: "256Mi", cpu: "100m" }
+          limits:   { memory: "1Gi",   cpu: "1000m" }
         livenessProbe:
-          httpGet:
-            path: /health
-            port: 7401
-          initialDelaySeconds: 30
+          httpGet:  { path: /health, port: 7401 }
+          initialDelaySeconds: 10
           periodSeconds: 10
         readinessProbe:
-          httpGet:
-            path: /health
-            port: 7401
+          # /ready calls the provider's health(), so it fails when Postgres is unreachable.
+          httpGet:  { path: /ready, port: 7401 }
           initialDelaySeconds: 5
           periodSeconds: 5
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: memory-core-service
-spec:
-  selector:
-    app: memory-core
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: 7401
-  type: ClusterIP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: memory-core-ingress
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
-spec:
-  rules:
-  - host: memory-core.yourdomain.com
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: memory-core-service
-            port:
-              number: 80
 ```
 
-**Deploy**:
+Use `/ready` for readiness and `/health` for liveness — that distinction matters here, because
+`/health` is static and would keep a pod with a dead database in the load-balancer pool.
+
+Run the migration as a `Job` rather than relying on `MEMORY_PG_AUTO_MIGRATE` with three
+replicas racing each other. It is idempotent, but a single ordered application is cleaner.
+
+`terminationGracePeriodSeconds` defaults to 30 s, which is comfortably more than the shutdown
+path needs (stop listening, then close the pg pool).
+
+## Behind a proxy
+
+- **Enable `trust proxy` first.** It is not set, so `req.ip` is the proxy's address and every
+  unauthenticated caller shares one rate-limit bucket. This needs a code change in
+  `src/http.ts`.
+- The per-process limiter multiplies by replica count. With three replicas and
+  `MEMORY_RATE_LIMIT_PER_MIN=120`, the real ceiling is 360/min.
+- Terminate TLS at the proxy; the service speaks plain HTTP only.
+- There is no CORS policy and no security headers. Do not expose this directly to a browser.
+
+## Health and observability
+
 ```bash
-kubectl apply -f deployment.yaml
+curl -s localhost:7401/health
+# {"ok":true,"service":"memory-core","timestamp":"2026-07-29T06:25:29.888Z"}
+
+curl -s localhost:7401/ready
+# {"ok":true,"service":"memory-core",
+#  "provider":{"ok":true,"provider":"in-memory","detail":"records=0, indexed=0"},
+#  "timestamp":"..."}
 ```
 
-### ConfigMap for Configuration
+That is the whole observability surface. There is no `/metrics`, no `/admin/*`, no tracing and
+no structured logging — the HTTP layer writes one line per request to `console.log`:
 
-**configmap.yaml**:
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: memory-core-config
-data:
-  NODE_ENV: "production"
-  MEMORY_PROVIDER: "dual-layer"
-  LOG_LEVEL: "info"
-  DUAL_LAYER_MAX_EVENTS: "1000"
-  DUAL_LAYER_PROCESSING_INTERVAL: "30000"
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: memory-core-secrets
-type: Opaque
-data:
-  # Base64 encoded values
-  api-key: "your-api-key-base64"
+```
+[memory-core] <request-id> POST /v1/memory/context 200 3ms
 ```
 
-Reference in deployment:
-```yaml
-envFrom:
-- configMapRef:
-    name: memory-core-config
-- secretRef:
-    name: memory-core-secrets
-```
+`x-request-id` is echoed from the caller when present, so it correlates with an upstream trace
+id. Collect stdout; there is no log file and no log-level control.
 
-## Production Optimizations
+## Auth
 
-### Performance Tuning
-
-**Node.js Optimizations**:
 ```bash
-export NODE_OPTIONS="--max-old-space-size=2048"
-export UV_THREADPOOL_SIZE=16
+export MEMORY_CORE_API_KEYS=key1,key2,key3
+curl -H "x-api-key: key1"           localhost:7401/v1/memory/compact -X POST
+curl -H "Authorization: Bearer key1" localhost:7401/v1/memory/compact -X POST
 ```
 
-**PM2 Configuration** (`ecosystem.config.js`):
-```javascript
-module.exports = {
-  apps: [{
-    name: 'memory-core',
-    script: 'dist/server.js',
-    instances: 'max',
-    exec_mode: 'cluster',
-    env: {
-      NODE_ENV: 'production',
-      PORT: 7401
-    },
-    error_file: './logs/err.log',
-    out_file: './logs/out.log',
-    log_file: './logs/combined.log',
-    time: true
-  }]
-};
-```
+Only `/v1/*` is gated. Keys are **not scoped to a tenant** — any valid key reaches every
+tenant — and comparison is not constant-time. There is no key rotation, expiry, per-key limit,
+or audit log.
 
-**Start with PM2**:
-```bash
-npm install -g pm2
-pm2 start ecosystem.config.js
-pm2 save
-pm2 startup
-```
+## Backup
 
-### Load Balancing
+- **`file`** — copy `MEMORY_FILE_PATH` while the process is idle. Every write rewrites the
+  whole file, so a copy taken mid-write can be truncated.
+- **`postgres`** — `pg_dump`. Embeddings live in `memory_embeddings_<dims>` tables alongside
+  `memories`; include them or plan to re-embed.
+- **`in-memory`, `enhanced`, `dual-layer`** — nothing to back up; state is lost on restart.
 
-**nginx.conf**:
-```nginx
-upstream memory_core {
-    server 127.0.0.1:7401;
-    server 127.0.0.1:7402;
-    server 127.0.0.1:7403;
-}
-
-server {
-    listen 80;
-    server_name memory-core.yourdomain.com;
-
-    location / {
-        proxy_pass http://memory_core;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
-        
-        # Timeouts
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-}
-```
-
-## Monitoring & Logging
-
-### Health Checks
-
-**Basic Health Check**:
-```bash
-curl -f http://localhost:7401/health
-```
-
-**Detailed Health Check**:
-```bash
-curl http://localhost:7401/health | jq '.'
-```
-
-Response:
-```json
-{
-  "status": "healthy",
-  "timestamp": "2024-01-01T00:00:00.000Z",
-  "uptime": 3600,
-  "provider": "dual-layer",
-  "memory": {
-    "used": "256MB",
-    "available": "1GB"
-  },
-  "performance": {
-    "avgResponseTime": 45,
-    "requestsPerSecond": 120
-  }
-}
-```
-
-### Logging Configuration
-
-**winston.config.js**:
-```javascript
-import winston from 'winston';
-
-const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json()
-  ),
-  defaultMeta: { service: 'memory-core' },
-  transports: [
-    new winston.transports.File({ 
-      filename: 'logs/error.log', 
-      level: 'error' 
-    }),
-    new winston.transports.File({ 
-      filename: 'logs/combined.log' 
-    })
-  ]
-});
-
-if (process.env.NODE_ENV !== 'production') {
-  logger.add(new winston.transports.Console({
-    format: winston.format.simple()
-  }));
-}
-
-export default logger;
-```
-
-### Metrics Collection
-
-**Prometheus Integration**:
-```javascript
-import client from 'prom-client';
-
-const register = new client.Registry();
-
-const httpRequestDuration = new client.Histogram({
-  name: 'http_request_duration_ms',
-  help: 'Duration of HTTP requests in ms',
-  labelNames: ['method', 'route', 'status_code'],
-  registers: [register]
-});
-
-const memoryUsage = new client.Gauge({
-  name: 'memory_usage_bytes',
-  help: 'Memory usage in bytes',
-  registers: [register]
-});
-
-// Expose metrics endpoint
-app.get('/metrics', async (req, res) => {
-  res.set('Content-Type', register.contentType);
-  res.end(await register.metrics());
-});
-```
-
-## Security Configuration
-
-### HTTPS Setup
-
-**SSL with nginx**:
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name memory-core.yourdomain.com;
-
-    ssl_certificate /etc/nginx/ssl/cert.pem;
-    ssl_certificate_key /etc/nginx/ssl/key.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-
-    location / {
-        proxy_pass http://localhost:7401;
-        # ... proxy headers
-    }
-}
-```
-
-### API Key Authentication
-
-**Environment Setup**:
-```bash
-export API_KEY_REQUIRED=true
-export API_KEYS="key1,key2,key3"
-```
-
-**Request Headers**:
-```bash
-curl -H "Authorization: Bearer your-api-key" \
-     http://localhost:7401/v1/memory/context
-```
-
-### CORS Configuration
-
-```javascript
-app.use(cors({
-  origin: process.env.CORS_ORIGIN?.split(',') || ['http://localhost:3000'],
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-}));
-```
-
-## Backup & Recovery
-
-### File Provider Backup
-
-**Automated Backup Script**:
-```bash
-#!/bin/bash
-BACKUP_DIR="/backups/memory-core"
-DATA_FILE="/data/memories.json"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-
-mkdir -p $BACKUP_DIR
-cp $DATA_FILE $BACKUP_DIR/memories_$TIMESTAMP.json
-
-# Keep only last 30 backups
-ls -t $BACKUP_DIR/memories_*.json | tail -n +31 | xargs rm -f
-```
-
-**Cron Job**:
-```bash
-# Backup every hour
-0 * * * * /path/to/backup-script.sh
-```
-
-### Dual-Layer Provider Backup
-
-**Export Data**:
-```bash
-curl -X POST http://localhost:7401/v1/memory/export \
-  -H "Content-Type: application/json" \
-  -d '{"tenantId": "all"}' > backup.json
-```
-
-**Restore Data**:
-```bash
-curl -X POST http://localhost:7401/v1/memory/import \
-  -H "Content-Type: application/json" \
-  -d @backup.json
-```
+There is no export or import route.
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **Port Already in Use**:
-   ```bash
-   lsof -i :7401
-   kill -9 <PID>
-   ```
-
-2. **Memory Leaks**:
-   ```bash
-   # Monitor memory usage
-   ps -p <PID> -o pid,vsz,rss,pmem,comm
-   
-   # Enable Node.js heap dumps
-   export NODE_OPTIONS="--heapsnapshot-signal=SIGUSR2"
-   kill -SIGUSR2 <PID>
-   ```
-
-3. **High CPU Usage**:
-   ```bash
-   # Profile with Node.js
-   node --prof your-app.js
-   node --prof-process isolate-*.log > profile.txt
-   ```
-
-4. **Database Connection Issues**:
-   ```bash
-   # Test connectivity
-   curl -f http://localhost:7401/health
-   
-   # Check logs
-   tail -f logs/error.log
-   ```
-
-### Performance Debugging
-
-**Enable Debug Logging**:
-```bash
-export DEBUG=memory-core:*
-export LOG_LEVEL=debug
-```
-
-**Performance Profiling**:
-```bash
-npm install -g clinic
-clinic doctor -- node dist/server.js
-```
-
-**Memory Analysis**:
-```bash
-node --inspect dist/server.js
-# Open chrome://inspect in Chrome
-```
-
-## Scaling Considerations
-
-### Horizontal Scaling
-
-- Use stateless providers (avoid file provider)
-- Implement session affinity if using in-memory
-- Consider shared storage for dual-layer insights
-- Use load balancer health checks
-
-### Vertical Scaling
-
-- Monitor memory usage per provider type
-- Adjust Node.js heap size
-- Consider CPU-intensive operations for dual-layer
-- Profile and optimize hot paths
-
-### Database Scaling
-
-- Consider external storage for large deployments
-- Implement provider for Redis/MongoDB
-- Use read replicas for query-heavy workloads
-- Implement caching layers
+| Symptom | Cause |
+|---|---|
+| `Invalid enum value` at startup | `MEMORY_PROVIDER` is not one of the five kinds. |
+| `Invalid PORT value` / `Invalid MEMORY_RATE_LIMIT_PER_MIN value` | Out of range. Rate limit must be 10–10000. |
+| Env var seems ignored | zod strips unknown keys. Only the variables in the table above are read. |
+| `filePath is required when MEMORY_PROVIDER=file` | `MEMORY_FILE_PATH` unset and no default resolved. |
+| 401 on `/v1/*` | `MEMORY_CORE_API_KEYS` is set and the key does not match. |
+| 429 | Rate limit. Check `Retry-After`. Remember it is per process. |
+| `/ready` 503 | Provider `health()` failed — usually Postgres unreachable. |
+| `postgres-provider: pgvector is not installed` | `CREATE EXTENSION vector;` in the target database. |
+| `postgres-provider: … requires both tenantId and appId` | An unscoped query. Intentional. |
+| Vector search returns nothing on `postgres` | Expected via env config: no embedder is injected, so the provider is FTS-only. Construct `PostgresMemoryProvider` with an `embedder`. See [`providers.md`](./providers.md#postgres). |
+| Container exits immediately | Check `docker logs`. A zod config error throws before the listener starts. |
+| Search returns nothing | `minScore` defaults differ per provider (0.05, 0.1, 0.2). Pass `minScore: 0`. |
+| `archivedSuperseded` always 0 | Correct. Nothing on the write path sets that status. |
