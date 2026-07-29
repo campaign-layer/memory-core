@@ -55,9 +55,20 @@ because the reasoning still explains *why* the design was wrong.
    | LoCoMo (n=1,531) | **0.344** | 0.336 |
    | LongMemEval (n=142) | 0.346 | **0.353** |
 
-   So the change is defensible on the broad-spectrum result (e.g. LongMemEval
-   recall@30 0.977 vs 0.946) and the +13.7pt recall@1 figure from the synthetic
-   suite should never be quoted as a general property.
+   Paired tests on LongMemEval (n=142) are the strictest read available, and they
+   narrow the claim further: recall@1 −0.007 (ns — only **one** question ranked
+   differently at all), recall@5 +0.019 (ns), recall@10 +0.007 (ns), and
+   **recall@30 +0.031, t=2.65, significant, 9 wins / 0 losses**.
+
+   So the honest justification for k=5 is "deeper recall improves and nothing
+   regresses", not "recall@1 improves". The +13.7pt recall@1 figure from the
+   synthetic suite must never be quoted as a general property.
+
+   The same paired analysis shows the far bigger effect is **hybrid vs BM25-only**:
+   recall@5 +7.3, recall@10 +6.5, recall@30 +7.2 (all significant), meanRank
+   27.2 → 5.7 — with recall@1 **unchanged** (+0.0006, ns). Hybrid retrieval buys
+   recall depth, not top-1 precision. It costs 26.5s/question of embedding against
+   45ms for BM25-only.
 
 6. **Hybrid retrieval fixes the preference blind spot, confirmed on public data.**
    `single-session-preference` is the worst slice for lexical retrieval on
