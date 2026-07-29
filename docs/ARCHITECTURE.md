@@ -45,8 +45,26 @@ because the reasoning still explains *why* the design was wrong.
    tie-break on best component score is the fix. Covered by a test.
 3. **The default RRF constant was wrong for this workload.** k=60 comes from the
    literature and assumes TREC-scale candidate pools; lowered to 5 on evidence from
-   two datasets. The gain is broad-spectrum on LoCoMo and concentrated at recall@1
-   on the synthetic suite, so the large recall@1 figure is fixture-specific.
+   three datasets, two of them public. k=5 wins recall@5/10/30, MRR and nDCG on all
+   three. The recall@1 story does **not** replicate and is fixture-specific — it
+   reverses sign on LongMemEval:
+
+   | recall@1 | k=5 | k=60 |
+   |---|---|---|
+   | bench/ synthetic (n=44) | **0.489** | 0.352 |
+   | LoCoMo (n=1,531) | **0.344** | 0.336 |
+   | LongMemEval (n=142) | 0.346 | **0.353** |
+
+   So the change is defensible on the broad-spectrum result (e.g. LongMemEval
+   recall@30 0.977 vs 0.946) and the +13.7pt recall@1 figure from the synthetic
+   suite should never be quoted as a general property.
+
+6. **Hybrid retrieval fixes the preference blind spot, confirmed on public data.**
+   `single-session-preference` is the worst slice for lexical retrieval on
+   LongMemEval — bm25 scores recall@5 0.300 against 0.65–0.92 on every other slice,
+   with gold outside the top 100 for 23% of those queries. Hybrid lifts it to 0.667
+   at k=5. That independently replicates the synthetic suite's preference family
+   going 0.0% → 66.7%, which was the finding that motivated wiring the embedder.
 4. **Event time is not decay time.** `service.ingest` set `lastSeenAt` from
    `observedAt`, so any import older than the 180-day default TTL expired on
    arrival while `ingest` returned `created=1` — silent loss behind a success
