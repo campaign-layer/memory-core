@@ -299,6 +299,48 @@ export class OpenAIEmbedder implements EmbeddingProvider {
   }
 }
 
+/** Backends `createEmbedder` can build. `none` disables semantic retrieval. */
+export type EmbedderKind = "none" | "local" | "hash" | "voyage" | "openai";
+
+export interface EmbedderSpec {
+  kind: EmbedderKind;
+  /** Backend model id. Each kind keeps its own default when omitted. */
+  model?: string;
+  /** Output width. REQUIRED with a non-default model, whose width we cannot infer. */
+  dims?: number;
+}
+
+/**
+ * Builds an embedder from a declarative spec (see config.ts for the env parse).
+ * Construction is deliberately cheap for every kind — LocalOnnxEmbedder loads
+ * its pipeline lazily and the hosted ones only read a key — so a service can
+ * build one at boot without paying for a model it may never query.
+ *
+ * Not wrapped in CachedEmbedder on purpose: providers keep document vectors for
+ * the process lifetime, so the only repeat text would be an identical query,
+ * and a cache filled by ingest would evict those anyway.
+ */
+export function createEmbedder(spec: EmbedderSpec): EmbeddingProvider | null {
+  switch (spec.kind) {
+    case "none":
+      return null;
+    case "hash":
+      // Lexical, not semantic: use it for deterministic offline tests, not to
+      // beat a lexical ranker it shares a signal with.
+      return new HashEmbedder({ dims: spec.dims });
+    case "local":
+      return new LocalOnnxEmbedder({ model: spec.model, dims: spec.dims });
+    case "voyage":
+      return new VoyageEmbedder({ model: spec.model, dims: spec.dims });
+    case "openai":
+      return new OpenAIEmbedder({ model: spec.model, dims: spec.dims });
+    default: {
+      const exhaustive: never = spec.kind;
+      throw new Error(`unknown embedder kind: ${String(exhaustive)}`);
+    }
+  }
+}
+
 /** Wraps any provider with an unbounded-by-default in-process cache. */
 export class CachedEmbedder implements EmbeddingProvider {
   readonly id: string;

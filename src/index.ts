@@ -31,6 +31,7 @@ export function createMemoryCoreFromConfig(config: MemoryCoreConfig) {
     postgresUrl: config.postgresUrl,
     autoMigrate: config.postgresAutoMigrate,
     embeddingModel: config.embeddingModel,
+    embedderSpec: config.embedder,
   });
   const service = new MemoryCoreService(provider);
   const app = createMemoryCoreApp(service, {
@@ -48,6 +49,7 @@ export function createDefaultMemoryCore(options: CreateMemoryCoreOptions = {}) {
     postgresUrl: config.postgresUrl,
     autoMigrate: config.postgresAutoMigrate,
     embeddingModel: config.embeddingModel,
+    embedderSpec: config.embedder,
   });
   const service = new MemoryCoreService(provider);
   const app = createMemoryCoreApp(service, {

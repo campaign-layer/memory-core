@@ -5,6 +5,7 @@
 import { rmSync } from "node:fs";
 import path from "node:path";
 import { createMemoryProvider, type MemoryProviderKind } from "../../src/providers/factory.js";
+import { parseEmbedderSpec } from "../../src/config.js";
 import type { MemoryProvider } from "../../src/provider.js";
 import {
   BENCH_ACTOR, BENCH_APP, BENCH_TENANT,
@@ -35,7 +36,12 @@ export function createProviderSystem(kind: MemoryProviderKind, ctx: SystemContex
 
     async setup() {
       if (kind === "file") rmSync(storePath, { force: true });
-      provider = createMemoryProvider({ kind, filePath: storePath });
+      // MEMORY_EMBEDDER selects the embedder; default "none" keeps BM25-only.
+      // MEMORY_RRF_K lets a sweep probe the fusion constant without a rebuild.
+      const embedderSpec = parseEmbedderSpec();
+      const rrfKRaw = process.env.MEMORY_RRF_K;
+      const rrfK = rrfKRaw ? Number(rrfKRaw) : undefined;
+      provider = createMemoryProvider({ kind, filePath: storePath, embedderSpec, rrfK });
     },
 
     async ingest(memories: MaterializedMemory[]) {

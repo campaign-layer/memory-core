@@ -8,7 +8,7 @@ import type {
   MemorySearchHit,
   MemorySearchQuery,
 } from "../types.js";
-import { InMemoryProvider } from "./in-memory-provider.js";
+import { InMemoryProvider, type InMemoryProviderOptions } from "./in-memory-provider.js";
 
 interface FileStoreShape {
   version: number;
@@ -17,13 +17,33 @@ interface FileStoreShape {
 
 const STORE_VERSION = 1;
 
+export type FileProviderOptions = InMemoryProviderOptions;
+
+/**
+ * InMemoryProvider plus a JSON snapshot, so hybrid search comes along for free.
+ *
+ * Vectors are NOT persisted; they are recomputed on load. persist() rewrites the
+ * whole store on every write, so a production snapshot (~5.6MB / ~3,700 records)
+ * would grow by another ~7.6MB of base64 float32 — 2-3x write amplification on
+ * the hot path, for data that is a derived cache of whatever model is currently
+ * configured. Recomputing also keeps the store format at version 1, so an older
+ * binary can still read the file, and makes a model or dimension change
+ * self-healing rather than a silent mix of two vector spaces. The cost is paid
+ * at load, in the background (see InMemoryProvider.restore), so a cold start is
+ * not blocked: search is BM25-only for the first moments after boot.
+ */
 export class FileProvider implements MemoryProvider {
-  private readonly inner = new InMemoryProvider();
+  private readonly inner: InMemoryProvider;
   private loading: Promise<void> | null = null;
   private pendingPersist: Promise<void> | null = null;
   private dirty = false;
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    options: FileProviderOptions = {},
+  ) {
+    this.inner = new InMemoryProvider(options);
+  }
 
   // Single-flight, so concurrent first requests cannot double-load or race a write.
   private ensureLoaded(): Promise<void> {
@@ -42,7 +62,8 @@ export class FileProvider implements MemoryProvider {
       if (!Array.isArray(parsed.records)) {
         throw new Error("Invalid file provider store format");
       }
-      await this.inner.ingest(parsed.records);
+      // restore(), not ingest(): indexes lexically now, embeds in the background.
+      await this.inner.restore(parsed.records);
     } catch (error) {
       const isNotFound = (error as NodeJS.ErrnoException).code === "ENOENT";
       if (!isNotFound) {
@@ -113,6 +134,16 @@ export class FileProvider implements MemoryProvider {
     if (this.pendingPersist) await this.pendingPersist;
   }
 
+  /**
+   * Resolves once every loaded record has a vector (or the embedder has given
+   * up). Vectors are rebuilt in the background after load, so callers that need
+   * semantic search to be warm — tests, a readiness probe — await this.
+   */
+  async awaitEmbeddings(): Promise<void> {
+    await this.ensureLoaded();
+    await this.inner.backfillEmbeddings();
+  }
+
   async close(): Promise<void> {
     await this.flush();
   }
@@ -167,10 +198,11 @@ export class FileProvider implements MemoryProvider {
 
   async health() {
     await this.ensureLoaded();
+    const inner = await this.inner.health();
     return {
       ok: true,
       provider: "file",
-      detail: `path=${this.filePath}`,
+      detail: `path=${this.filePath}, ${inner.detail}`,
     };
   }
 }
