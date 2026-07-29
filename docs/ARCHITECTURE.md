@@ -2,6 +2,66 @@
 
 Status: active plan. Written after an audit that verified every claim below by running the code.
 
+## Status update
+
+The problem list below was accurate when written. Several items have since been
+fixed, and benchmarking against public datasets changed the priority order. What
+follows is the current state; the original analysis is kept intact underneath
+because the reasoning still explains *why* the design was wrong.
+
+**Fixed and measured**
+
+| Was | Now |
+|---|---|
+| `pruneExpired()` full scan on every read | Lazy `isVisible()`; `getById` at 50k records went 17,395ms → 1.0ms per 2000 calls |
+| O(N) dedupe per observation | Normalized-text index; `findDuplicate` 30,121ms → 3.0ms, batch ingest 8,084ms → 83ms |
+| `FileProvider` compacting on every read, rewriting per write | Compaction removed from reads, writes coalesced |
+| No semantic retrieval reachable from config | `MEMORY_EMBEDDER` selects none/local/hash/voyage/openai; hybrid BM25+vector RRF in the in-memory and file providers, and pgvector HNSW now reachable for postgres |
+| `processingTime: Date.now() - Date.now()` | Real timing via `performance.now()` |
+| `MEMORY_PROVIDER=dual-layer` crashed at boot | Config enum derived from `MemoryProviderKind` |
+| Dockerfile installed prod deps then ran `tsc` | Multi-stage build (note: Railway builds with Railpack and never reads it) |
+| Benchmark-overfit gazetteers and a hardcoded gold answer | Deleted; the string was verbatim LongMemEval question 1's answer |
+
+**Measured retrieval quality** (see `docs/BENCHMARKS.md` for commands)
+
+| Dataset | BM25-only | Hybrid | Reference |
+|---|---|---|---|
+| LoCoMo, n=1,531, R@10 | 0.626 | **0.709** | mem0 OSS 0.694 |
+| LoCoMo, n=1,531, R@1 | 0.332 | 0.344 | mem0 OSS **0.345** |
+| LongMemEval, n=479, R@10 | 0.780 (bm25 baseline) | pending | — |
+
+**What the numbers changed about the plan**
+
+1. **The write path is confirmed as the gap, but "consolidation" is the wrong
+   target.** Across 5,882 LoCoMo turns, mem0 emitted 3,164 memory events and
+   **every one was `ADD` — zero `UPDATE`, zero `DELETE`.** Its advantage comes from
+   *extraction and distillation*, not from the merge/supersede loop. So the
+   Extractor (item 7 below) outranks the full Resolver (item 3) for closing the
+   gap to mem0, even though the Resolver is still what fixes knowledge-update.
+2. **RRF cannot express confidence, only rank.** An item found only by vector
+   search at rank 1 scores `1/(k+1)` — identical to an item found only lexically at
+   rank 1, at every k. A cosine of 1.000 therefore ties a mediocre lexical match.
+   Magnitude-aware fusion (`linearFusion` in `src/retrieval/fusion.ts`) or a
+   tie-break on best component score is the fix. Covered by a test.
+3. **The default RRF constant was wrong for this workload.** k=60 comes from the
+   literature and assumes TREC-scale candidate pools; lowered to 5 on evidence from
+   two datasets. The gain is broad-spectrum on LoCoMo and concentrated at recall@1
+   on the synthetic suite, so the large recall@1 figure is fixture-specific.
+4. **Event time is not decay time.** `service.ingest` set `lastSeenAt` from
+   `observedAt`, so any import older than the 180-day default TTL expired on
+   arrival while `ingest` returned `created=1` — silent loss behind a success
+   response. Fixed; `firstSeenAt` keeps event time.
+5. **QA-style scoring is weak evidence on LoCoMo.** With gold evidence supplied
+   directly, the oracle scores only 0.485, so the answering step dominates and all
+   retrieval systems compress under a low ceiling. Rank metrics are the signal.
+
+**Still open** — Problems 1, 2, 4, 6 and 9 below stand substantially as written:
+four ranking implementations still exist (no `MemoryStore`/`Retriever` split), there
+is still no Extractor or Resolver, nothing ever sets `superseded`, `buildContext`
+still budgets in characters rather than tokens with MMR unwired, tenant scope is
+still a filter argument rather than a structural handle, and there is no learning
+loop. Retrieval is now hybrid but still single-shot: no multi-hop.
+
 ## Thesis
 
 **memory-core is built as a key-value store with a scoring function bolted on. A memory system is a pipeline problem.**
@@ -18,6 +78,10 @@ The current design has nowhere to put either. `MemoryProvider.search()` is one f
 ## Problem 1 — The provider interface conflates storage with ranking
 
 `src/provider.ts` puts persistence (`ingest`, `update`, `getById`, `listByActor`) and retrieval (`search`) behind one interface. So every storage backend must reimplement ranking from scratch. We now have four independent, mutually-incompatible, all-poor scoring functions:
+
+The formulas below are as they stood at audit time; `in-memory` and `dual-layer`
+have since been rewritten (see the status update above). The structural point is
+unchanged — there are still four separate ranking implementations.
 
 | Implementation | Formula |
 |---|---|
