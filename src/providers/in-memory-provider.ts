@@ -21,9 +21,18 @@ import type { EmbeddingProviderLike } from "./postgres-provider.js";
 const CANDIDATE_MULTIPLIER = 5;
 const MIN_CANDIDATES = 50;
 
-// RRF rank constant. 60 is the usual default; larger values flatten the
-// advantage of the top ranks.
-const DEFAULT_RRF_K = 60;
+// RRF rank constant. The literature's k=60 is calibrated for TREC-scale
+// candidate pools; at our candidate counts it flattens the advantage of the top
+// ranks. Lowered to 5 on evidence from two datasets, one of them public and not
+// authored here, where k=5 beat k=60 on every metric:
+//
+//   bench/ (synthetic)  R@1  35.2% -> 48.9%,  R@10 95.5% -> 95.5%
+//   LoCoMo (n=1,531)    R@1  33.6% -> 34.4%,  R@10 66.6% -> 70.9%
+//
+// The gain is concentrated at R@1 on the synthetic suite and broad-spectrum on
+// LoCoMo, so treat the large R@1 jump as fixture-specific. Override with
+// MEMORY_RRF_K.
+const DEFAULT_RRF_K = 5;
 
 // Cosine floor for a vector candidate. Without it every stored memory is a
 // candidate for every query, so a query with no real match would come back full
