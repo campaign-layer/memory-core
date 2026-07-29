@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
 import type { MemoryIdScope, MemoryProvider } from "../provider.js";
 import type {
@@ -34,6 +34,7 @@ export class FileProvider implements MemoryProvider {
   private async load(): Promise<void> {
     const dir = path.dirname(this.filePath);
     await fs.mkdir(dir, { recursive: true });
+    await this.assertWritable(dir);
 
     try {
       const raw = await fs.readFile(this.filePath, "utf8");
@@ -49,6 +50,26 @@ export class FileProvider implements MemoryProvider {
         throw error;
       }
       await this.persist();
+    }
+  }
+
+  /**
+   * Fail at load time rather than per-write. persist() creates `<file>.tmp` in
+   * this directory, so directory write permission is required even when the
+   * store file itself is readable — a mounted volume owned by another uid reads
+   * fine and then rejects every write with EACCES.
+   */
+  private async assertWritable(dir: string): Promise<void> {
+    try {
+      await fs.access(dir, fsConstants.W_OK);
+    } catch (cause) {
+      const uid = typeof process.getuid === "function" ? process.getuid() : "unknown";
+      this.loading = null;
+      throw new Error(
+        `memory-core cannot write to "${dir}" as uid=${uid}, so no memory could be persisted. ` +
+          `If this is a mounted volume, chown it to the runtime user: chown -R ${uid}:${uid} ${dir}`,
+        { cause },
+      );
     }
   }
 
