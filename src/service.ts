@@ -110,7 +110,14 @@ export class MemoryCoreService {
     const updated: MemoryRecord[] = [];
 
     for (const obs of input.observations) {
-      const now = obs.observedAt || new Date().toISOString();
+      // Event time and bookkeeping time are different things. `observedAt` is when
+      // the thing happened; decay and recency read `lastSeenAt`, which is when the
+      // store last touched the memory. Conflating them made any historical import
+      // expire on arrival: a 2023 observation under the default 180-day TTL was
+      // already stale, so ingest returned created=1 for a record that getById,
+      // search, listByActor and getProfile all refused to return.
+      const ingestedAt = new Date().toISOString();
+      const observedAt = obs.observedAt || ingestedAt;
       const candidate = normalizeRecord({
         id: uid("mem"),
         tenantId: obs.tenantId,
@@ -127,10 +134,11 @@ export class MemoryCoreService {
         status: "active",
         source: obs.source,
         decayPolicy: obs.decayPolicy || DEFAULT_DECAY,
-        firstSeenAt: now,
-        lastSeenAt: now,
-        createdAt: now,
-        updatedAt: now,
+        // firstSeenAt keeps the event time so temporal reasoning still has it.
+        firstSeenAt: observedAt,
+        lastSeenAt: ingestedAt,
+        createdAt: ingestedAt,
+        updatedAt: ingestedAt,
         stats: {
           selectedCount: 0,
           positiveCount: 0,
@@ -140,8 +148,9 @@ export class MemoryCoreService {
 
       const duplicate = await this.provider.findDuplicate(candidate);
       if (duplicate) {
-        duplicate.lastSeenAt = now;
-        duplicate.updatedAt = now;
+        // Re-observing a memory reinforces it, so its decay window restarts.
+        duplicate.lastSeenAt = ingestedAt;
+        duplicate.updatedAt = ingestedAt;
         duplicate.confidence = Math.max(duplicate.confidence, candidate.confidence);
         duplicate.importance = Math.max(duplicate.importance, candidate.importance);
         duplicate.summary = duplicate.summary || candidate.summary;

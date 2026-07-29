@@ -57,7 +57,7 @@ test("compact archives expired records based on decay policy", async () => {
   const provider = new InMemoryProvider();
   const service = new MemoryCoreService(provider);
 
-  await service.ingest({
+  const ingested = await service.ingest({
     observations: [
       {
         tenantId: "camp",
@@ -66,14 +66,22 @@ test("compact archives expired records based on decay policy", async () => {
         memoryType: "fact",
         text: "Signed to label in 2020",
         source: { sourceType: "profile_import" },
-        observedAt: "2020-01-01T00:00:00.000Z",
         decayPolicy: { kind: "time", ttlDays: 1 },
       },
     ],
   });
 
+  // Age the record by moving lastSeenAt, which is how a memory actually goes
+  // stale: time passes without it being re-observed. Backdating `observedAt`
+  // deliberately no longer does this — event time is not decay time, or every
+  // historical import would expire on arrival.
+  const stale = ingested.records[0];
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+  await provider.update({ ...stale, lastSeenAt: twoDaysAgo });
+
   const compacted = await service.compact();
-  assert.ok(compacted.archivedExpired >= 1);
+  assert.ok(compacted.archivedExpired >= 1, "a record untouched past its TTL must be archived");
+  assert.equal(await provider.getById(stale.id), null, "an archived record must stop being returned");
 });
 
 test("file provider persists records across service instances", async () => {
@@ -483,4 +491,37 @@ test("bm25 rejects out-of-range parameters and honours topK=0", async () => {
   index.add("d1", "alpha beta gamma");
   assert.equal(index.search("alpha", 0).length, 0, "topK=0 must return nothing, not everything");
   assert.equal(index.search("alpha", 5).length, 1);
+});
+
+test("a historical import stays retrievable under the default decay policy", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const filters = { tenantId: "camp", appId: "import", actorId: "u_hist" };
+
+  // Event time is years in the past; the default decay is time/180d. Before the
+  // fix, lastSeenAt was set to observedAt, so the record was expired on arrival
+  // and ingest still reported created=1 — silent loss behind a success response.
+  const result = await service.ingest({
+    observations: [
+      {
+        ...filters,
+        memoryType: "fact",
+        text: "Attended the support group in May 2023",
+        source: { sourceType: "history_import" },
+        observedAt: "2023-05-07T10:00:00.000Z",
+      },
+    ],
+  });
+  assert.equal(result.created, 1);
+
+  const stored = result.records[0];
+  assert.ok(await provider.getById(stored.id), "an imported memory must be retrievable by id");
+  assert.equal((await provider.listByActor(filters.tenantId, filters.appId, filters.actorId)).length, 1);
+  assert.equal((await service.getProfile(filters.tenantId, filters.appId, filters.actorId)).count, 1);
+  assert.equal((await provider.search({ query: "support group May 2023", filters })).length, 1);
+  assert.equal((await service.compact()).archivedExpired, 0, "it must not be archived as expired");
+
+  // Event time is preserved for temporal reasoning; decay reads lastSeenAt.
+  assert.equal(stored.firstSeenAt, "2023-05-07T10:00:00.000Z", "firstSeenAt keeps the event time");
+  assert.ok(stored.lastSeenAt > "2026-01-01", `lastSeenAt should be ingest time, got ${stored.lastSeenAt}`);
 });
