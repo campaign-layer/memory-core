@@ -644,8 +644,15 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     return { archivedExpired, archivedSuperseded: 0 };
   }
 
-  // Context building over the enhanced retrieval path. Extractive only: every line
-  // comes from a stored memory, nothing is synthesized.
+  /**
+   * Context building over the enhanced retrieval path. Extractive only: every
+   * line comes from a stored memory, nothing is synthesized.
+   *
+   * @deprecated Use `MemoryCoreService.buildContext`. This assembles prompt text
+   * without going through the service, so it does not get the service's guards,
+   * and this provider ranks near chance on public benchmarks (LongMemEval R@10
+   * 0.125 against a 0.014 random floor). It has no callers outside its own test.
+   */
   async buildEnhancedContext(query: string, filters: MemoryFilters, budget: { maxItems?: number }): Promise<{
     contextText: string;
     selectedMemories: Array<{
@@ -663,6 +670,10 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     const selectedMemories = [];
 
     for (const hit of searchHits.slice(0, maxItems)) {
+      // Same rule the service applies: text an extractor never rewrote or
+      // grounded must not reach a prompt. An attacker can force that path by
+      // inducing an unparsable model response, which stores the raw turn.
+      if (hit.memory.source?.metadata?.extractionOrigin === "fallback") continue;
       contextLines.push(`- [${hit.memory.memoryType}] ${hit.memory.text} (score: ${hit.score.toFixed(3)})`);
       selectedMemories.push({
         id: hit.memory.id,

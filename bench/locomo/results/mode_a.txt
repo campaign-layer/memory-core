@@ -1,0 +1,84 @@
+
+=== MODE A: overall (n=1531 answerable questions, depth=30) ===
+system                          R@1    R@5    R@10   R@30   MRR    nDCG10 meanRk medRk  found
+bm25                           0.303  0.507  0.578  0.673  0.437  0.450   157.2    4.0 0.739
+mem0-metadata                  0.345  0.635  0.694  0.783  0.534  0.548    94.9    2.0 0.844
+mem0-textmatch                 0.345  0.639  0.703  0.795  0.537  0.553    86.3    2.0 0.859
+mem0                           0.345  0.635  0.694  0.783  0.534  0.548    94.9    2.0 0.844
+memory-core-hybrid-rrf5        0.344  0.620  0.709  0.817  0.524  0.544    73.4    2.0 0.882
+memory-core-hybrid-rrf60       0.336  0.580  0.666  0.777  0.501  0.517    98.0    2.0 0.840
+memory-core:dual-layer         0.055  0.215  0.295  0.456  0.147  0.170   296.3   30.0 0.505
+memory-core:enhanced           0.020  0.070  0.099  0.167  0.054  0.057   472.3  589.0 0.202
+memory-core:in-memory          0.332  0.555  0.626  0.726  0.482  0.494   127.3    3.0 0.790
+random                         0.002  0.012  0.020  0.057  0.012  0.010   541.4  589.0 0.083
+random (analytic)              0.002  0.009  0.017  0.051  0.010      -   545.8
+
+--- category 1 (multi-hop), n=281 ---
+system                          R@1    R@5    R@10   R@30   MRR    nDCG10 meanRk
+bm25                           0.063  0.175  0.267  0.387  0.259  0.200   212.2
+mem0-metadata                  0.119  0.373  0.490  0.679  0.466  0.385    56.7
+mem0-textmatch                 0.119  0.369  0.487  0.688  0.466  0.383    48.7
+mem0                           0.119  0.373  0.490  0.679  0.466  0.385    56.7
+memory-core-hybrid-rrf5        0.102  0.340  0.445  0.619  0.426  0.354    78.0
+memory-core-hybrid-rrf60       0.099  0.332  0.417  0.576  0.404  0.336   109.2
+memory-core:dual-layer         0.011  0.035  0.077  0.199  0.075  0.050   367.5
+memory-core:enhanced           0.004  0.017  0.035  0.091  0.040  0.024   458.1
+memory-core:in-memory          0.080  0.249  0.351  0.501  0.334  0.271   151.6
+random                         0.002  0.009  0.014  0.050  0.028  0.012   495.0
+
+--- category 2 (temporal), n=320 ---
+system                          R@1    R@5    R@10   R@30   MRR    nDCG10 meanRk
+bm25                           0.360  0.611  0.692  0.757  0.499  0.532   128.2
+mem0-metadata                  0.432  0.745  0.803  0.872  0.613  0.644    65.3
+mem0-textmatch                 0.432  0.760  0.808  0.880  0.619  0.650    58.2
+mem0                           0.432  0.745  0.803  0.872  0.613  0.644    65.3
+memory-core-hybrid-rrf5        0.475  0.705  0.765  0.860  0.610  0.633    71.4
+memory-core-hybrid-rrf60       0.459  0.687  0.742  0.836  0.593  0.613    82.3
+memory-core:dual-layer         0.061  0.239  0.309  0.488  0.161  0.182   288.1
+memory-core:enhanced           0.027  0.095  0.121  0.241  0.065  0.070   439.4
+memory-core:in-memory          0.437  0.646  0.707  0.801  0.558  0.579   104.4
+random                         0.003  0.011  0.019  0.056  0.010  0.010   551.2
+
+--- category 3 (open-domain/commonsense), n=89 ---
+system                          R@1    R@5    R@10   R@30   MRR    nDCG10 meanRk
+bm25                           0.109  0.244  0.255  0.362  0.231  0.201   320.3
+mem0-metadata                  0.131  0.345  0.431  0.622  0.323  0.305   131.0
+mem0-textmatch                 0.131  0.341  0.425  0.622  0.319  0.302   125.1
+mem0                           0.131  0.345  0.431  0.622  0.323  0.305   131.0
+memory-core-hybrid-rrf5        0.154  0.324  0.407  0.566  0.310  0.293   190.2
+memory-core-hybrid-rrf60       0.140  0.282  0.371  0.493  0.289  0.269   254.5
+memory-core:dual-layer         0.011  0.062  0.092  0.155  0.051  0.053   459.1
+memory-core:enhanced           0.000  0.015  0.043  0.074  0.016  0.017   517.8
+memory-core:in-memory          0.135  0.259  0.312  0.419  0.259  0.237   287.3
+random                         0.000  0.011  0.011  0.054  0.007  0.005   544.0
+
+--- category 4 (single-hop), n=841 ---
+system                          R@1    R@5    R@10   R@30   MRR    nDCG10 meanRk
+bm25                           0.381  0.605  0.672  0.770  0.495  0.529   132.7
+mem0-metadata                  0.409  0.711  0.749  0.800  0.548  0.592   115.2
+mem0-textmatch                 0.409  0.716  0.765  0.817  0.554  0.600   105.5
+mem0                           0.409  0.711  0.749  0.800  0.548  0.592   115.2
+memory-core-hybrid-rrf5        0.396  0.712  0.807  0.893  0.547  0.601    60.2
+memory-core-hybrid-rrf60       0.389  0.654  0.751  0.852  0.520  0.567    83.7
+memory-core:dual-layer         0.071  0.282  0.383  0.561  0.177  0.217   258.5
+memory-core:enhanced           0.025  0.084  0.117  0.174  0.059  0.068   484.8
+memory-core:in-memory          0.397  0.655  0.721  0.805  0.525  0.563   111.0
+random                         0.001  0.013  0.023  0.059  0.008  0.010   552.9
+
+=== ingest cost / wall-clock ===
+system                          ingest_s   llm_calls  prompt_tok  compl_tok    usd     search_ms
+bm25                               0.03          0           0          0   0.0000       0.17
+mem0-metadata                   28826.7       5882    51567748     239406   3.4454      37.99
+mem0-textmatch                  28826.7       5882    51567748     239406   3.4454      37.99
+mem0                            28826.7       5882    51567748     239406   3.4454      37.99
+memory-core-hybrid-rrf5          104.02          0           0          0   0.0000          -
+memory-core-hybrid-rrf60         146.06          0           0          0   0.0000          -
+memory-core:dual-layer             4.03          0           0          0   0.0000      32.06
+memory-core:enhanced               4.56          0           0          0   0.0000      12.15
+memory-core:in-memory              0.07          0           0          0   0.0000       0.17
+random                                0          0           0          0   0.0000       0.01
+
+!! integrity warnings
+   memory-core:dual-layer: missing=0 foreign_turn_refs=20207
+
+wrote out/mode_a.json

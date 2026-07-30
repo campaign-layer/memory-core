@@ -1,5 +1,6 @@
 import path from "node:path";
 import { z } from "zod";
+import type { ExtractorKind, ExtractorSpec } from "./extraction/types.js";
 import type { MemoryProviderKind } from "./providers/factory.js";
 import type { EmbedderKind, EmbedderSpec } from "./retrieval/embedder.js";
 
@@ -12,6 +13,10 @@ type ProviderKindsAreExhaustive = AssertNever<Exclude<MemoryProviderKind, (typeo
 // Same lockstep guard for EmbedderKind.
 const EMBEDDER_KINDS = ["none", "local", "hash", "voyage", "openai"] as const satisfies readonly EmbedderKind[];
 type EmbedderKindsAreExhaustive = AssertNever<Exclude<EmbedderKind, (typeof EMBEDDER_KINDS)[number]>>;
+
+// Same lockstep guard for ExtractorKind.
+const EXTRACTOR_KINDS = ["none", "llm"] as const satisfies readonly ExtractorKind[];
+type ExtractorKindsAreExhaustive = AssertNever<Exclude<ExtractorKind, (typeof EXTRACTOR_KINDS)[number]>>;
 
 const envSchema = z.object({
   PORT: z.string().optional(),
@@ -27,6 +32,11 @@ const envSchema = z.object({
   MEMORY_EMBEDDER: z.enum(EMBEDDER_KINDS).optional(),
   MEMORY_EMBEDDING_MODEL: z.string().optional(),
   MEMORY_EMBEDDING_DIMS: z.string().optional(),
+  MEMORY_EXTRACTOR: z.enum(EXTRACTOR_KINDS).optional(),
+  MEMORY_EXTRACTOR_BASE_URL: z.string().optional(),
+  MEMORY_EXTRACTOR_API_KEY: z.string().optional(),
+  MEMORY_EXTRACTOR_MODEL: z.string().optional(),
+  MEMORY_EXTRACTOR_BATCH_SIZE: z.string().optional(),
 });
 
 export interface MemoryCoreConfig {
@@ -41,6 +51,7 @@ export interface MemoryCoreConfig {
   /** Label only; postgres stores it next to each vector. `embedder.model` drives selection. */
   embeddingModel?: string;
   embedder: EmbedderSpec;
+  extractor: ExtractorSpec;
 }
 
 function parsePort(raw: string | undefined): number {
@@ -95,6 +106,35 @@ export function parseEmbedderSpec(env: NodeJS.ProcessEnv = process.env): Embedde
   };
 }
 
+function parseBatchSize(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const value = Number(raw);
+  // Upper bound is about attribution quality, not tokens: past ~200 turns per
+  // call the model starts mis-numbering which turn a fact came from.
+  if (!Number.isInteger(value) || value < 1 || value > 200) {
+    throw new Error(`Invalid MEMORY_EXTRACTOR_BATCH_SIZE value: ${raw} (expected an integer in 1..200)`);
+  }
+  return value;
+}
+
+/**
+ * Reads the extractor selection on its own, mirroring parseEmbedderSpec.
+ *
+ * `none` is the default and is non-negotiable: a production service on the file
+ * provider must keep its exact current write behaviour until MEMORY_EXTRACTOR is
+ * set explicitly.
+ */
+export function parseExtractorSpec(env: NodeJS.ProcessEnv = process.env): ExtractorSpec {
+  const parsed = envSchema.parse(env);
+  return {
+    kind: parsed.MEMORY_EXTRACTOR || "none",
+    baseUrl: parsed.MEMORY_EXTRACTOR_BASE_URL,
+    apiKey: parsed.MEMORY_EXTRACTOR_API_KEY,
+    model: parsed.MEMORY_EXTRACTOR_MODEL,
+    batchSize: parseBatchSize(parsed.MEMORY_EXTRACTOR_BATCH_SIZE),
+  };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): MemoryCoreConfig {
   const parsed = envSchema.parse(env);
   return {
@@ -108,5 +148,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MemoryCoreConf
     postgresAutoMigrate: parsed.MEMORY_PG_AUTO_MIGRATE === "true",
     embeddingModel: parsed.MEMORY_EMBEDDING_MODEL,
     embedder: parseEmbedderSpec(env),
+    extractor: parseExtractorSpec(env),
   };
 }

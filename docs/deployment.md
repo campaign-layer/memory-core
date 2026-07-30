@@ -1,13 +1,60 @@
 # Deployment
 
-Running memory-core. Read [`PRODUCTION_READINESS.md`](./PRODUCTION_READINESS.md) first — the
-rate limiter is per-process, API keys are not tenant-scoped, and there is no CI. Nothing here
-has run in production.
+Running memory-core. Read
+[Limits to know before you deploy](#limits-to-know-before-you-deploy) first.
 
 Earlier revisions of this file documented CORS settings, `LOG_LEVEL`, `NODE_ENV`-driven
 behaviour, winston logging, a `prom-client` `/metrics` endpoint, `FILE_BACKUP_*`,
 `ENHANCED_*`, `DUAL_LAYER_*` variables, and `/v1/memory/export` + `/v1/memory/import` routes.
 **None of those exist.** The lists below are exhaustive.
+
+## Limits to know before you deploy
+
+Not a certification — a gap list, re-checked against the code.
+
+### Horizontal scaling
+
+- **The rate limiter is per-process.** Three replicas means 3x the configured limit. It is
+  decorative behind a load balancer.
+- **`trust proxy` is not enabled.** Behind any reverse proxy `req.ip` is the proxy's address,
+  so every unauthenticated client shares one bucket and the limiter blocks everyone or no one.
+  Enabling it needs a code change in `src/http.ts`.
+- **No idempotency keys on ingest.** A retried `POST /v1/memory/ingest` relies on exact-text
+  dedupe, which fails the moment the text differs by one character.
+- **Only `postgres` can back more than one replica.** `in-memory`, `file`, `enhanced` and
+  `dual-layer` are process-local, and `file` actively corrupts under two writers.
+
+### Auth
+
+- **API keys are not scoped to a tenant.** Any valid key reads and writes **every** tenant.
+  Multi-tenancy is enforced against accidents, not against a hostile caller holding a key.
+- No per-key rate limits, no rotation, no expiry, no audit log of memory reads or writes.
+- Keys are compared with `Set.has()` — not constant-time.
+- No CORS policy and no security headers. Do not expose this directly to a browser.
+- The only request-size control is `express.json({ limit: "2mb" })`.
+
+### Observability
+
+- **No `/metrics` endpoint and no tracing.** Earlier docs advertised a Prometheus-compatible
+  `/metrics` and `/admin/*`; neither exists and both return 404.
+- `buildContext` returns a real `processingTime`, but nothing is aggregated or exported.
+- Hybrid hits carry component scores; the lexical path returns prose `reasons` only.
+- No SLOs, dashboards or alerts.
+
+### Retrieval quality
+
+Measured, not asserted — see [`BENCHMARKS.md`](./BENCHMARKS.md). The short version: mem0 beats
+us on LoCoMo R@1/R@5/MRR/nDCG and on QA accuracy, a plain BM25 baseline beats us on
+LongMemEval R@1, no system anywhere handles knowledge updates, the `postgres` provider has no
+measured retrieval number at all, and `buildContext` — the endpoint agents actually call — is
+unmeasured.
+
+### Reliability
+
+- No dead-letter queue for failed ingest or update, no backpressure, no circuit breakers.
+- `service.ingest` loops observations sequentially; batch ingest is serial.
+- `FileProvider.persist()` re-serializes every record on every write.
+- `dual-layer`'s consolidation is O(n²) per actor on a 30 s timer, unbounded.
 
 ## Local
 
@@ -43,14 +90,31 @@ started.
 | `MEMORY_PG_URL` | dev localhost URL | Postgres connection string. |
 | `DATABASE_URL` | — | Fallback if `MEMORY_PG_URL` is unset. |
 | `MEMORY_PG_AUTO_MIGRATE` | `false` | Exactly the string `"true"` enables it. |
-| `MEMORY_EMBEDDING_MODEL` | unset | **Label only.** Stored beside vectors; does not select a model. |
+| `MEMORY_EMBEDDER` | `none` | `none` \| `local` \| `hash` \| `voyage` \| `openai`. `none` means BM25-only retrieval. |
+| `MEMORY_EMBEDDING_MODEL` | unset | Model id override, and the label stored beside vectors. |
+| `MEMORY_EMBEDDING_DIMS` | unset | Dimension override. Integer 1–16000 or startup throws. |
+| `MEMORY_EXTRACTOR` | `none` | `none` (passthrough) \| `llm`. `none` keeps the write path byte-identical to pre-extraction behaviour. |
+| `MEMORY_EXTRACTOR_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible chat endpoint. |
+| `MEMORY_EXTRACTOR_API_KEY` | unset | Key for the above. |
+| `MEMORY_EXTRACTOR_MODEL` | `gpt-4o-mini` | Extraction model. |
+| `MEMORY_EXTRACTOR_BATCH_SIZE` | unset | Turns per extraction call. Integer 1–200 or startup throws. |
 
 The MCP server reads a separate set (`MEMORY_TENANT_ID`, `MEMORY_APP_ID`, `MEMORY_ACTOR_ID`,
 `MEMORY_CORE_URL`, `MEMORY_CORE_API_KEY`, `MEMORY_CORE_MODE`, `MEMORY_THREAD_ID`,
 `MEMORY_SOURCE_TYPE`) — see [`src/integrations/README.md`](../src/integrations/README.md).
 
-`VOYAGE_API_KEY` and `OPENAI_API_KEY` are read only by the corresponding embedder classes,
-which the env-driven server path never constructs.
+`VOYAGE_API_KEY` and `OPENAI_API_KEY` are read by the corresponding embedder classes when
+`MEMORY_EMBEDDER` selects them.
+
+**Turning on `MEMORY_EMBEDDER` changes cost, not just quality.** On the synthetic corpus
+(527 records, one machine) `local` took ingest from 6 ms to 3.7 s and search from 0.11 ms to
+6.2 ms mean. `local` downloads a ~35 MB ONNX model on first use and is offline thereafter;
+`voyage` and `openai` add a network call per batch. Confirm what started with `/ready` — the
+`detail` string names the resolved embedder and its dimension.
+
+**`MEMORY_EXTRACTOR=llm` costs one model call per batch of turns** and has no measured
+quality number. The default `none` is what every published benchmark for this project was
+measured with.
 
 ## Docker
 

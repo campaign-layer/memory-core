@@ -1,10 +1,12 @@
 import type { MemoryProvider } from "./provider.js";
 import { createMemoryCoreApp } from "./http.js";
 import { loadConfig, type MemoryCoreConfig } from "./config.js";
+import { createExtractor } from "./extraction/index.js";
 import { createMemoryProvider } from "./providers/factory.js";
 import { MemoryCoreService } from "./service.js";
 
 export * from "./types.js";
+export * from "./extraction/index.js";
 export * from "./provider.js";
 export * from "./service.js";
 export * from "./http.js";
@@ -33,7 +35,7 @@ export function createMemoryCoreFromConfig(config: MemoryCoreConfig) {
     embeddingModel: config.embeddingModel,
     embedderSpec: config.embedder,
   });
-  const service = new MemoryCoreService(provider);
+  const service = new MemoryCoreService(provider, { extractor: createExtractor(config.extractor) });
   const app = createMemoryCoreApp(service, {
     apiKeys: config.apiKeys,
     rateLimitPerMin: config.rateLimitPerMin,
@@ -51,7 +53,7 @@ export function createDefaultMemoryCore(options: CreateMemoryCoreOptions = {}) {
     embeddingModel: config.embeddingModel,
     embedderSpec: config.embedder,
   });
-  const service = new MemoryCoreService(provider);
+  const service = new MemoryCoreService(provider, { extractor: createExtractor(config.extractor) });
   const app = createMemoryCoreApp(service, {
     apiKeys: config.apiKeys,
     rateLimitPerMin: config.rateLimitPerMin,

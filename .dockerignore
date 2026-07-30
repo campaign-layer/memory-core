@@ -1,12 +1,31 @@
-node_modules
-npm-debug.log
 .git
 .gitignore
-README.md
+.github
+.claude
+
+node_modules
+dist
+npm-debug.log
+*.log
+
+# Never let a local env file into the build context.
 .env
-.nyc_output
-coverage
+.env.local
+.env.*.local
+
+# Not needed at runtime: the build stage compiles src/ only, and stage 3 copies
+# dist/, production node_modules, package.json and migrations/.
+bench
+docs
+examples
+README.md
+CONTRIBUTING.md
+LICENSE
+
+# Local caches and runtime data.
+.cache
+.models
 .nyc_output
 .coverage
-.cache
-dist
+coverage
+data

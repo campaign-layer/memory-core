@@ -1,0 +1,784 @@
+{
+  "mode": "B (QA accuracy, LLM judge)",
+  "provenance": {
+    "memory_core_git_sha": "5ea385230b8ac0066e91a9847aedecf05eebdc97",
+    "dataset_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "corpus_sha256": "26ec6082f1589897de7a33980a9a1b4a3993c72566949c14855cd2afc942b748",
+    "query_sha256": "a0f80aa287c16c6add1a2b4e2ea4ab44bf9919f8f6fdbe708342d1bce12a05a4",
+    "answerer_model": "deepseek/deepseek-v4-flash (reasoning disabled)",
+    "judge_model": "deepseek/deepseek-v4-flash (reasoning disabled)",
+    "command": "python run_mode_b.py --systems=... --ks=10,30 --checkpoint=out/mode_b.jsonl && python score_mode_b.py --checkpoint=out/mode_b.jsonl"
+  },
+  "notes": {
+    "context_unit": "each system's NATIVE retrieved unit: dialogue turns for memory-core/bm25/random, mem0's own consolidated memory texts for mem0",
+    "oracle": "k=0 row; context is the gold evidence turns, giving the answering upper bound that separates retrieval failure from answering failure",
+    "cat5": "adversarial/unanswerable; scored as abstention (CORRECT = declines), never mixed into answerable accuracy"
+  },
+  "llm_usage": {
+    "llm_calls": 48270,
+    "prompt_tokens": 28593675,
+    "completion_tokens": 1007201,
+    "reasoning_tokens": 4967,
+    "llm_errors": 0,
+    "retries": 6,
+    "truncated_responses": 7,
+    "usd_cost_reported_by_openrouter": 3.703292,
+    "usd_cost_at_list_price": 4.28513
+  },
+  "results": {
+    "bm25@k=10": {
+      "system": "bm25",
+      "k": 10,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 554,
+        "accuracy": 0.3597
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 434,
+        "accuracy": 0.9731
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 40,
+          "accuracy": 0.1418,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 49,
+          "accuracy": 0.1526,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 6,
+          "accuracy": 0.0625,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 459,
+          "accuracy": 0.5458,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 434,
+          "accuracy": 0.9731,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.4091,
+      "mean_context_items": 9.98,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "bm25@k=30": {
+      "system": "bm25",
+      "k": 30,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 599,
+        "accuracy": 0.389
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 434,
+        "accuracy": 0.9731
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 50,
+          "accuracy": 0.1773,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 44,
+          "accuracy": 0.1371,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 9,
+          "accuracy": 0.0938,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 496,
+          "accuracy": 0.5898,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 434,
+          "accuracy": 0.9731,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.3695,
+      "mean_context_items": 29.87,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "mem0@k=10": {
+      "system": "mem0",
+      "k": 10,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 706,
+        "accuracy": 0.4584
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 430,
+        "accuracy": 0.9641
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 91,
+          "accuracy": 0.3227,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 104,
+          "accuracy": 0.324,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 15,
+          "accuracy": 0.1562,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 496,
+          "accuracy": 0.5898,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 430,
+          "accuracy": 0.9641,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.311,
+      "mean_context_items": 10.0,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "mem0@k=30": {
+      "system": "mem0",
+      "k": 30,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 743,
+        "accuracy": 0.4825
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 429,
+        "accuracy": 0.9619
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 104,
+          "accuracy": 0.3688,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 111,
+          "accuracy": 0.3458,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 18,
+          "accuracy": 0.1875,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 510,
+          "accuracy": 0.6064,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 429,
+          "accuracy": 0.9619,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.3058,
+      "mean_context_items": 30.0,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "memory-core-hybrid-rrf5@k=10": {
+      "system": "memory-core-hybrid-rrf5",
+      "k": 10,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 665,
+        "accuracy": 0.4318
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 433,
+        "accuracy": 0.9709
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 61,
+          "accuracy": 0.2163,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 52,
+          "accuracy": 0.162,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 15,
+          "accuracy": 0.1562,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 537,
+          "accuracy": 0.6385,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 433,
+          "accuracy": 0.9709,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.3071,
+      "mean_context_items": 10.0,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "memory-core-hybrid-rrf5@k=30": {
+      "system": "memory-core-hybrid-rrf5",
+      "k": 30,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 715,
+        "accuracy": 0.4643
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 430,
+        "accuracy": 0.9641
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 78,
+          "accuracy": 0.2766,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 54,
+          "accuracy": 0.1682,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 12,
+          "accuracy": 0.125,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 571,
+          "accuracy": 0.679,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 430,
+          "accuracy": 0.9641,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.2864,
+      "mean_context_items": 30.0,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "memory-core-hybrid-rrf60@k=10": {
+      "system": "memory-core-hybrid-rrf60",
+      "k": 10,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 621,
+        "accuracy": 0.4032
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 432,
+        "accuracy": 0.9686
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 59,
+          "accuracy": 0.2092,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 52,
+          "accuracy": 0.162,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 13,
+          "accuracy": 0.1354,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 497,
+          "accuracy": 0.591,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 432,
+          "accuracy": 0.9686,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.3468,
+      "mean_context_items": 10.0,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "memory-core-hybrid-rrf60@k=30": {
+      "system": "memory-core-hybrid-rrf60",
+      "k": 30,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 695,
+        "accuracy": 0.4513
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 426,
+        "accuracy": 0.9552
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 74,
+          "accuracy": 0.2624,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 58,
+          "accuracy": 0.1807,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 13,
+          "accuracy": 0.1354,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 550,
+          "accuracy": 0.654,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 426,
+          "accuracy": 0.9552,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.2968,
+      "mean_context_items": 30.0,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "memory-core:in-memory@k=10": {
+      "system": "memory-core:in-memory",
+      "k": 10,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 598,
+        "accuracy": 0.3883
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 431,
+        "accuracy": 0.9664
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 54,
+          "accuracy": 0.1915,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 44,
+          "accuracy": 0.1371,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 8,
+          "accuracy": 0.0833,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 492,
+          "accuracy": 0.585,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 431,
+          "accuracy": 0.9664,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.3649,
+      "mean_context_items": 9.98,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "memory-core:in-memory@k=30": {
+      "system": "memory-core:in-memory",
+      "k": 30,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 641,
+        "accuracy": 0.4162
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 431,
+        "accuracy": 0.9664
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 60,
+          "accuracy": 0.2128,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 47,
+          "accuracy": 0.1464,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 11,
+          "accuracy": 0.1146,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 523,
+          "accuracy": 0.6219,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 431,
+          "accuracy": 0.9664,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.3292,
+      "mean_context_items": 29.89,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "oracle@k=0": {
+      "system": "oracle",
+      "k": 0,
+      "overall_answerable_cat1_4": {
+        "n": 233,
+        "judged": 233,
+        "correct": 113,
+        "accuracy": 0.485
+      },
+      "adversarial_cat5_abstention": {
+        "n": 67,
+        "judged": 67,
+        "correct": 67,
+        "accuracy": 1.0
+      },
+      "per_category": {
+        "1": {
+          "n": 43,
+          "judged": 43,
+          "correct": 15,
+          "accuracy": 0.3488,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 48,
+          "judged": 48,
+          "correct": 8,
+          "accuracy": 0.1667,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 15,
+          "judged": 15,
+          "correct": 2,
+          "accuracy": 0.1333,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 127,
+          "judged": 127,
+          "correct": 88,
+          "accuracy": 0.6929,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 67,
+          "judged": 67,
+          "correct": 67,
+          "accuracy": 1.0,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.2918,
+      "mean_context_items": 1.43,
+      "empty_context_questions": 1,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "random@k=10": {
+      "system": "random",
+      "k": 10,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 32,
+        "accuracy": 0.0208
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 442,
+        "accuracy": 0.991
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 6,
+          "accuracy": 0.0213,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 4,
+          "accuracy": 0.0125,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 0,
+          "accuracy": 0.0,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 22,
+          "accuracy": 0.0262,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 442,
+          "accuracy": 0.991,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.9565,
+      "mean_context_items": 10.0,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    },
+    "random@k=30": {
+      "system": "random",
+      "k": 30,
+      "overall_answerable_cat1_4": {
+        "n": 1540,
+        "judged": 1540,
+        "correct": 66,
+        "accuracy": 0.0429
+      },
+      "adversarial_cat5_abstention": {
+        "n": 446,
+        "judged": 446,
+        "correct": 440,
+        "accuracy": 0.9865
+      },
+      "per_category": {
+        "1": {
+          "n": 282,
+          "judged": 282,
+          "correct": 8,
+          "accuracy": 0.0284,
+          "label": "multi-hop"
+        },
+        "2": {
+          "n": 321,
+          "judged": 321,
+          "correct": 7,
+          "accuracy": 0.0218,
+          "label": "temporal"
+        },
+        "3": {
+          "n": 96,
+          "judged": 96,
+          "correct": 0,
+          "accuracy": 0.0,
+          "label": "open-domain/commonsense"
+        },
+        "4": {
+          "n": 841,
+          "judged": 841,
+          "correct": 51,
+          "accuracy": 0.0606,
+          "label": "single-hop"
+        },
+        "5": {
+          "n": 446,
+          "judged": 446,
+          "correct": 440,
+          "accuracy": 0.9865,
+          "label": "adversarial (unanswerable)"
+        }
+      },
+      "refusal_rate_on_answerable": 0.9065,
+      "mean_context_items": 30.0,
+      "empty_context_questions": 0,
+      "unjudged": 0,
+      "answer_errors": 0
+    }
+  }
+}

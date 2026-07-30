@@ -1,6 +1,7 @@
 {
   "name": "@maitrix/memory-core",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "Standalone memory core service for multi-app AI context and profile memory",
@@ -13,7 +14,7 @@
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/service.test.ts src/retrieval/*.test.ts src/integrations/*.test.ts src/providers/hybrid-search.test.ts",
+    "test": "tsx --test src/service.test.ts src/retrieval/*.test.ts src/integrations/*.test.ts src/providers/hybrid-search.test.ts src/extraction/*.test.ts",
     "test:pg": "tsx --test src/providers/postgres-provider.test.ts",
     "test:all": "npm test && npm run test:pg",
     "bench": "tsx bench/run.ts",

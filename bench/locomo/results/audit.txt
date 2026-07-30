@@ -1,0 +1,11 @@
+[PASS] corpus turns come only from conversation.session_N -- 5882 turns verified
+[INFO] 30 annotation fields present in the dataset and none ingested (guaranteed by check 1, which whitelists dialogue turn text only)
+[PASS] query text == dataset question text -- 1986 questions verified
+[INFO] 3/1986 questions contain their own gold answer (LoCoMo multiple-choice phrasing; identical for all systems, not a harness leak)
+[PASS] no answer/gold field referenced in ranking code paths -- checked ['run_retrieval.ts', 'run_mem0.py', 'attribute_mem0.py']; attribute_mem0.py reads gold only for the ceiling diagnostic, never for ranking
+[PASS] memory-core/src contains no benchmark-specific literals
+[PASS] random control sits at analytic chance -- empirical R@10=0.0198 vs analytic 0.0170
+[PASS] every turn-id system stayed inside its own conversation's corpus -- bm25=0, memory-core-hybrid-rrf5=0, memory-core-hybrid-rrf60=0, memory-core:enhanced=0, memory-core:in-memory=0, random=0
+[INFO] memory-core:dual-layer returned 20207 synthesized (non-turn) records of ~45930 slots -- consolidating provider; score is a LOWER bound unless attributed
+
+AUDIT PASSED

@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "noEmit": true
+  },
+  "include": [
+    "*.ts",
+    "../types.ts",
+    "../metrics.ts",
+    "../tokenize.ts",
+    "../systems/bm25.ts",
+    "../systems/random.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "data",
+    "work",
+    "out"
+  ],
+  "_comment": "Mirrors the repo root tsconfig. noUncheckedIndexedAccess is deliberately NOT set: this program necessarily pulls in src/** through the provider factory, and that flag reports 250+ pre-existing findings there which would drown out real harness errors. bench/tsconfig.json is the strict one."
+}

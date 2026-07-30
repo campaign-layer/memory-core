@@ -1,0 +1,30 @@
+Matched-denominator QA accuracy, LoCoMo Mode B.
+
+The oracle upper bound was run on a deterministic stratified subsample, so comparing it
+to full-set system accuracy mixes denominators. This table restricts every system to the
+EXACT question set the oracle answered (n = 233 answerable), which is the only valid way
+to read the "retrieval failure vs answering failure" split.
+
+Regenerate with:  python3 oracle_matched.py     (reads out/mode_b.jsonl)
+
+oracle subsample: 300 questions (233 answerable)
+
+system@k                               full-set   oracle-subset   n_sub  per-category (oracle subset)
+oracle@k=0                                0.485           0.485     233  c1=0.349 c2=0.167 c3=0.133 c4=0.693
+mem0@k=30                                 0.482           0.476     233  c1=0.302 c2=0.396 c3=0.133 c4=0.606
+mem0@k=10                                 0.458           0.472     233  c1=0.302 c2=0.417 c3=0.133 c4=0.591
+memory-core-hybrid-rrf5@k=30              0.464           0.451     233  c1=0.233 c2=0.042 c3=0.133 c4=0.717
+memory-core-hybrid-rrf5@k=10              0.432           0.446     233  c1=0.186 c2=0.125 c3=0.133 c4=0.693
+memory-core:in-memory@k=30                0.416           0.442     233  c1=0.140 c2=0.104 c3=0.133 c4=0.709
+memory-core-hybrid-rrf60@k=30             0.451           0.442     233  c1=0.256 c2=0.104 c3=0.133 c4=0.669
+memory-core-hybrid-rrf60@k=10             0.403           0.421     233  c1=0.233 c2=0.104 c3=0.200 c4=0.630
+bm25@k=30                                 0.389           0.416     233  c1=0.093 c2=0.125 c3=0.133 c4=0.669
+memory-core:in-memory@k=10                0.388           0.403     233  c1=0.186 c2=0.104 c3=0.133 c4=0.622
+bm25@k=10                                 0.360           0.378     233  c1=0.163 c2=0.083 c3=0.067 c4=0.598
+random@k=30                               0.043           0.026     233  c1=0.023 c2=0.000 c3=0.000 c4=0.039
+random@k=10                               0.021           0.004     233  c1=0.000 c2=0.000 c3=0.000 c4=0.008
+
+---
+
+The "oracle-subset" column is what the repository README quotes as
+"answer accuracy on matched denominators (n = 233)".

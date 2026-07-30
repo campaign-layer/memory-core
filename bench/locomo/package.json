@@ -1,0 +1,17 @@
+{
+  "name": "memory-core-bench-locomo",
+  "private": true,
+  "type": "module",
+  "description": "LoCoMo harness for memory-core, including the head-to-head against mem0 OSS.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "mode-a": "./mode_a.sh",
+    "mode-b": "./mode_b.sh",
+    "hybrid": "./run_hybrid_all.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.27",
+    "tsx": "^4.21.0",
+    "typescript": "^5.6.3"
+  }
+}

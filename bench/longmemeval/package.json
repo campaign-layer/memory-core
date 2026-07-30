@@ -1,0 +1,19 @@
+{
+  "name": "memory-core-bench-longmemeval",
+  "private": true,
+  "type": "module",
+  "description": "LongMemEval_S harness for memory-core. Mode A = retrieval only, Mode B = QA with an LLM reader and judge.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "mode-a": "./run-modeA.sh",
+    "mode-b": "./run-modeB.sh",
+    "hybrid-subset": "./run-hybrid-subset.sh",
+    "verify-no-leak": "tsx verify-no-leak.ts",
+    "preflight-hybrid": "tsx preflight-hybrid.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.27",
+    "tsx": "^4.21.0",
+    "typescript": "^5.6.3"
+  }
+}

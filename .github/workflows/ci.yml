@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      # RETRIEVAL_ONNX_TEST is deliberately unset: that case downloads a ~35 MB model.
+      - run: npm test
+
+      - run: npm run build
+
+  bench:
+    # The random control must stay beatable and the fixture must stay reproducible.
+    # BM25-only, so no model download and no API key.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx tsx bench/run.ts --systems=random,bm25,in-memory --size=small --k=10
+
+      - name: Assert the fixture is byte-identical after regeneration
+        run: |
+          npm run bench:dataset
+          git diff --exit-code -- bench/dataset/generated

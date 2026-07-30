@@ -5,13 +5,18 @@ ranking**. That conflation is the central design problem in this repo — see
 [`ARCHITECTURE.md`](./ARCHITECTURE.md) Problem 1 — and it is why five backends have five
 independent scoring functions, none of which improve when another does.
 
-Retrieval numbers on this page come from one harness run. Read
-[`BENCHMARKS.md`](./BENCHMARKS.md) for what the dataset is and is not before quoting any of
+Retrieval numbers on this page come from the synthetic harness in `bench/`. Read
+[`BENCHMARKS.md`](./BENCHMARKS.md) for what that dataset is and is not before quoting any of
 them: `memory-core-internal-retrieval` v1.0.0, synthetic, authored in this repo, **not
 LongMemEval, not LoCoMo**.
 
 ```bash
+# BM25-only
 npx tsx bench/run.ts --systems=random,bm25,in-memory,file,enhanced,dual-layer,naive-rag --size=small --k=10
+
+# hybrid
+MEMORY_EMBEDDER=local MEMORY_RRF_K=5 \
+  npx tsx bench/run.ts --systems=random,bm25,in-memory --size=small --k=10
 ```
 
 ## The interface
@@ -52,13 +57,21 @@ Contracts every implementation shares:
 
 ## Selecting one
 
-`MEMORY_PROVIDER`, default `in-memory`.
+`MEMORY_PROVIDER` picks the backend (default `in-memory`); `MEMORY_EMBEDDER` decides whether
+retrieval is hybrid or BM25-only (default `none`, meaning BM25-only).
 
 ```bash
-MEMORY_PROVIDER=in-memory  npm run dev   # default; RAM only
-MEMORY_PROVIDER=file       npm run dev   # single-node JSON persistence
-MEMORY_PROVIDER=dual-layer npm run dev
-MEMORY_PROVIDER=postgres MEMORY_PG_URL=postgres://... npm run dev
+MEMORY_PROVIDER=in-memory  npm run dev                        # default; RAM only, BM25-only
+MEMORY_EMBEDDER=local      npm run dev                        # same, but hybrid BM25 + vector
+MEMORY_PROVIDER=file MEMORY_FILE_PATH=./data/mc.json npm run dev
+MEMORY_PROVIDER=postgres MEMORY_PG_URL=postgres://... MEMORY_EMBEDDER=local npm run dev
+```
+
+Confirm what actually started with `/ready`; the `detail` string names the provider and the
+embedder:
+
+```
+"detail":"records=0, indexed=0, embedder=onnx:Xenova/bge-small-en-v1.5/384d vectors=0"
 ```
 
 There are **no** `ENHANCED_*` or `DUAL_LAYER_*` environment variables. Earlier revisions of
@@ -68,16 +81,21 @@ configured through their constructors only.
 
 ## Summary
 
-| kind | storage | durable | measured `R@10` | search mean / p95 | verdict |
-|---|---|---|---|---|---|
-| `in-memory` | RAM | no | 89.8% | 0.12 / 0.48 ms | Best-measured in-process provider. Default. |
-| `file` | one JSON file | single node | 89.8% | 0.07 / 0.16 ms | Same ranking as in-memory, O(N) write amplification. |
-| `enhanced` | RAM + mock vectors | no | 38.6% | 4.16 / 5.16 ms | **Do not use.** Worst real system in the harness. |
-| `dual-layer` | RAM, two tiers | no | 78.4% | 7.95 / 9.66 ms | Best `multi-session` in-process (81.3%). Slowest. |
-| `postgres` | Postgres + pgvector | yes | **not benchmarked** | not benchmarked | Only multi-replica-safe option. |
+`R@10` and latency are from the synthetic harness; see [`BENCHMARKS.md`](./BENCHMARKS.md).
 
-For reference from the same run: a plain BM25 baseline scores `R@10` 92.0% — higher than every
-provider here.
+| kind | storage | durable | `R@10` hybrid | `R@10` BM25-only | search mean / p95 | verdict |
+|---|---|---|---|---|---|---|
+| `in-memory` | RAM | no | **95.5%** | 89.8% | 6.17 / 8.65 ms hybrid, 0.11 / 0.20 ms BM25-only | Default. Best measured quality. |
+| `file` | one JSON file | single node | same | same | 0.07 / 0.16 ms | Identical ranking to in-memory. Single node only. |
+| `enhanced` | RAM + mock vectors | no | — | 38.6% | 4.16 / 5.16 ms | **Deprecated. Do not use.** |
+| `dual-layer` | RAM, two tiers | no | — | 78.4% | 7.95 / 9.66 ms | **Deprecated. Do not use.** |
+| `postgres` | Postgres + pgvector | yes | **not benchmarked** | not benchmarked | not benchmarked | Only multi-replica-safe option. |
+
+`enhanced` and `dual-layer` ignore the embedder entirely — the factory does not pass one to
+either — so they have no hybrid column.
+
+For reference from the same runs: a plain Okapi BM25 baseline scores `R@10` 92.0%, which is
+**higher than the BM25-only providers** and lower than hybrid.
 
 ---
 
@@ -85,7 +103,11 @@ provider here.
 
 `src/providers/in-memory-provider.ts`. RAM, volatile, zero config. **The default.**
 
-Ranking:
+Two ranking paths, chosen per query. If no embedder is configured, no vectors have been
+computed yet, or nothing clears the similarity floor, it takes the lexical path; otherwise
+the hybrid path.
+
+**Lexical path** (`MEMORY_EMBEDDER=none`, the default):
 
 ```
 relevance = BM25(query, text + summary), max-normalized against the top candidate
@@ -93,22 +115,39 @@ quality   = recency*0.35 + confidence*0.35 + importance*0.30 + feedbackBoost
 score     = relevance * (0.7 + 0.3 * quality)
 ```
 
-- Uses `BM25Index` from `src/retrieval/bm25.ts` — the one place a shared retrieval primitive
-  is actually adopted by a provider.
-- **Relevance gates, quality modulates.** Zero term overlap can never produce a hit, which is
-  why `foundRate` is 100% and `meanRank` is 3.6.
-- `feedbackBoost` = `clamp((positive − negative) * 0.05, ±0.3)`.
-- Candidates are pulled from BM25 *before* re-weighting, `max(limit*5, 50)` of them, with
-  tenant/app/actor/type/scope filters applied inside the BM25 scan so scoping precedes
-  ranking.
-- Exact-duplicate lookups go through a `dupIndex` map, so dedupe is O(1) per observation
-  rather than a full scan.
-- Default `minScore` is `0.05`.
+**Hybrid path** (`MEMORY_EMBEDDER=local|hash|voyage|openai`):
 
-Known weakness: max-normalizing BM25 means the top hit always scores ~1.0 no matter how weak
-the absolute match was. That satisfies the 0–1 score contract but destroys the score's meaning
-as a confidence signal, and it is why `FPR@tau` is 50% (see
-[`BENCHMARKS.md`](./BENCHMARKS.md#abstention-score-calibration)).
+```
+fused     = RRF([bm25Candidates, vectorCandidates], rrfK)     # rrfK default 5
+relevance = fused, max-normalized against the top fused candidate
+score     = relevance * (0.7 + 0.3 * quality)                 # same quality term
+```
+
+- Uses `BM25Index` from `src/retrieval/bm25.ts` and `rrf` from `src/retrieval/fusion.ts`.
+- **Relevance gates, quality modulates.** Zero relevance can never produce a hit, which is
+  why `foundRate` is 100%.
+- Candidates come from each ranker independently, `max(limit*5, 50)` of them, with
+  tenant/app/actor/type/scope filters applied *inside* each scan so scoping precedes ranking.
+- Hybrid hits carry a `components` object — `{fused, relevance, quality, bm25, bm25Rank,
+  vector, vectorRank}` — and their `reasons` name the provenance (`"lexical and vector
+  match"`, `"bm25 #3"`, `"vector #1"`). This is the only place in the codebase that exposes
+  per-stage component scores on the request path.
+- `feedbackBoost` = `clamp((positive − negative) * 0.05, ±0.3)`.
+- Exact-duplicate lookups go through a `dupIndex` map, so dedupe is O(1) per observation.
+- **Embedder failures degrade rather than fail.** A throw during ingest or search logs once,
+  disables the embedder for a cooldown (`embedderCooldownMs`), and retrieval continues
+  BM25-only.
+- Default `minScore` is `0.05`.
+- `rrfK` is a constructor option (`new InMemoryProvider({ embedder, rrfK })`) and the bench
+  harness reads `MEMORY_RRF_K` so a sweep needs no rebuild. It is **not** read from the
+  environment by the server.
+
+Known weakness: both paths max-normalize relevance, so the top hit always scores ~1.0 no
+matter how weak the absolute match was. That satisfies the 0–1 score contract but destroys
+the score's meaning as a confidence signal. Hybrid makes it worse — RRF is rank-only, so a
+cosine of 1.000 and a mediocre lexical match at the same rank contribute identically. Measured
+`FPR@tau` is 50% BM25-only and 66.7% hybrid; see
+[`BENCHMARKS.md`](./BENCHMARKS.md#abstention-score-calibration).
 
 ## `file`
 
@@ -124,9 +163,12 @@ Cost: `persist()` re-serializes **every** record on every `ingest`, `update` and
 `applyFeedback`, so loading a dataset is O(N²) in disk writes. Single node only — two
 processes on one file will clobber each other.
 
-## `enhanced` — not recommended
+## `enhanced` — DEPRECATED, do not use
 
-`src/providers/enhanced-provider.ts`. **The worst real system in the harness**: `R@10` 38.6%,
+`src/providers/enhanced-provider.ts`. Retained only so the evidence against it survives.
+On LongMemEval it scores `R@10` **.1254** against a **.0139** random floor, with a mean rank
+of 274.3 against the random control's 351.9 — the harness flagged it **at or below random on
+mean rank**. On the synthetic suite it is **the worst real system**: `R@10` 38.6%,
 `foundRate` 59.1% (the correct memory is outside the top 100 of a 527-memory corpus for 41% of
 queries), `meanRank` 222.4 against BM25's 3.3, and ~34x `in-memory`'s search latency. It never
 retrieves the right memory for knowledge-update questions (0.0%).
@@ -162,10 +204,13 @@ generated corpus contains none of those tokens, so the class of cheat cannot sil
 Domain-specific vocabulary in ranking code is a non-negotiable in
 [`ARCHITECTURE.md`](./ARCHITECTURE.md#non-negotiables).
 
-## `dual-layer`
+## `dual-layer` — DEPRECATED, do not use
 
 `src/providers/dual-layer-provider.ts`. Two tiers — short-term events mirroring the canonical
-records, and long-term insights derived from them by background consolidation.
+records, and long-term insights derived from them by background consolidation. It clears the
+random control comfortably but loses to BM25-only by a wide margin on the public dataset
+(LongMemEval `R@10` .4764 against .8023) and is the slowest in-process provider. It ignores
+`MEMORY_EMBEDDER` entirely, so it cannot benefit from hybrid retrieval.
 
 Ranking:
 
@@ -254,11 +299,19 @@ score = relevance*0.55 + recency*0.15 + confidence*0.15 + importance*0.10 + feed
 `recency*0.4 + confidence*0.3 + importance*0.3 + feedback` over the newest active rows. Every
 caller-supplied value goes through a bind parameter — nothing is interpolated.
 
-**Vector search is disabled unless you inject an embedder.** The env-driven path
-(`createMemoryCoreFromConfig` → `createMemoryProvider`) passes `embedder: null`, so
-`MEMORY_PROVIDER=postgres` runs **FTS-only**, and `MEMORY_EMBEDDING_MODEL` is purely a label
-stored beside vectors — it does not select a model. To enable the vector side, construct the
-provider directly:
+**Vector search follows `MEMORY_EMBEDDER`.** The env-driven path
+(`createMemoryCoreFromConfig` → `createMemoryProvider`) resolves the embedder from
+`MEMORY_EMBEDDER` and hands it to the provider, so:
+
+```bash
+MEMORY_PROVIDER=postgres MEMORY_PG_URL=postgres://... npm run dev                      # FTS-only
+MEMORY_PROVIDER=postgres MEMORY_PG_URL=postgres://... MEMORY_EMBEDDER=local npm run dev # hybrid
+```
+
+An earlier revision of this file said the env path passed `embedder: null` and that the vector
+side could only be reached by constructing the provider directly. That is no longer true.
+
+Constructing it directly is still the way to supply a custom embedder or wrap one in a cache:
 
 ```typescript
 import { PostgresMemoryProvider, LocalOnnxEmbedder, CachedEmbedder } from "../src/index.js";
@@ -270,6 +323,12 @@ const provider = new PostgresMemoryProvider({
   autoMigrate: true,
 });
 ```
+
+**`rrfK` differs between backends.** The Postgres provider still defaults to **60**; the
+in-process providers default to **5**. The evidence for lowering it (deeper recall improves,
+nothing regresses) is in [`BENCHMARKS.md`](./BENCHMARKS.md#rrfk-on-a-subset) and was gathered
+on the in-process path. The Postgres default has not been re-measured, which is why it has not
+been changed.
 
 Constructor options: `pool` (a caller-owned pool is never ended by `close()`), `poolMax` (10),
 `connectionTimeoutMs` (5000), `idleTimeoutMs` (30000), `statementTimeoutMs` (30000, sent as a
@@ -305,21 +364,19 @@ tests:
 | `rerank.ts` | `Reranker` interface |
 | `index.ts` | `HybridRetriever` — BM25 ∥ vector → fuse → optional rerank → optional MMR, with per-stage component scores |
 
-**Adoption so far:** `in-memory`/`file` use `BM25Index`; `postgres` accepts the
-`EmbeddingProvider` shape. `HybridRetriever` is exported from the package root but **is not on
-the service request path** — nothing in `src/service.ts` or any provider calls it.
+**Adoption so far:** `in-memory`/`file` use `BM25Index` and `rrf`, and expose per-stage
+component scores on hybrid hits; `postgres` accepts the `EmbeddingProvider` shape and does its
+own RRF in SQL. `mmr.ts` and `rerank.ts` are **unused** — no provider diversifies or reranks.
+`HybridRetriever` is exported from the package root but **is not on the service request
+path**; the providers reimplement the same shape internally, which is
+[Problem 1](./ARCHITECTURE.md#problem-1--the-provider-interface-conflates-storage-with-ranking).
 
 ## Adding a provider
 
-1. Implement `MemoryProvider` from `src/provider.ts` — all nine required methods.
-2. Add the kind to `MemoryProviderKind` in `src/providers/factory.ts` and branch in
-   `createMemoryProvider`.
-3. Add it to `PROVIDER_KINDS` in `src/config.ts`. The `satisfies` + `AssertNever` pair there
-   makes the build fail if you forget.
-4. Enforce `tenantId` + `appId` on every read. Throw on an unscoped query; do not return
-   everything.
-5. Register it in `bench/systems/index.ts` and run the harness against it, including the
-   `random` control, before and after. No retrieval claim ships without that.
+Step-by-step in [`CONTRIBUTING.md`](../CONTRIBUTING.md#adding-a-provider). The two rules that
+are not negotiable: enforce `tenantId` + `appId` on every read (throw on an unscoped query;
+never return everything), and register the provider in `bench/systems/index.ts` and run the
+harness with the `random` control before making any retrieval claim.
 
 ## Migrating between providers
 

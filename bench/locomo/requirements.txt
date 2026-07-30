@@ -1,0 +1,17 @@
+# LoCoMo harness -- Python side.
+#
+#   python3 -m venv .venv
+#   ./.venv/bin/pip install -r requirements.txt
+#
+# Versions are the ones the committed results/ artifacts were produced with. The
+# mem0 version in particular is part of the provenance: results/mode_a.json labels
+# every mem0 row "mem0 OSS 2.0.14", and a different version is a different system.
+#
+# Only the mem0 comparison needs mem0ai / sentence-transformers / qdrant-client.
+# Mode B on its own needs nothing but httpx; build_corpus.py and the audits need
+# nothing outside the standard library.
+
+mem0ai==2.0.14
+sentence-transformers>=3.0
+qdrant-client>=1.9
+httpx>=0.27

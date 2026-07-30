@@ -1,0 +1,26 @@
+mem0 reasoning sensitivity (matched conversations, matched turn prefix)
+
+=== conv-26 (first 198 turns of 419) ===
+  metric                            reasoning=OFF   reasoning=ON
+  noop_rate                                  0.54          0.515
+  ADD                                         118            107
+  UPDATE                                        0              0
+  turn_coverage                              0.46          0.485
+  gold_in_prefix                              114            114
+  gold_coverage_ceiling                     0.851          0.798
+  wrong_year_rate                           0.305          0.215
+  mean_completion_tokens                     46.6          729.1
+  mean_seconds_per_add                       5.29          36.87
+
+=== conv-30 (first 200 turns of 369) ===
+  metric                            reasoning=OFF   reasoning=ON
+  noop_rate                                  0.66          0.525
+  ADD                                          82            115
+  UPDATE                                        0              0
+  turn_coverage                              0.34          0.475
+  gold_in_prefix                               65             65
+  gold_coverage_ceiling                     0.738          0.877
+  wrong_year_rate                            0.11          0.148
+  mean_completion_tokens                     30.9          661.0
+  mean_seconds_per_add                       4.92          24.05
+

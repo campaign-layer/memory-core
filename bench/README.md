@@ -1,16 +1,52 @@
-# memory-core retrieval benchmark harness
+# memory-core benchmarks
 
-A reproducible harness for measuring **retrieval quality** of memory backends in this
-repo, plus baselines to compare them against.
+Three suites live here, in ascending order of evidential weight. All three are runnable
+from a clean checkout; two of them need a third-party dataset downloaded first.
 
-## Read this before quoting any number from here
+| suite | dataset | who wrote the dataset | where |
+|---|---|---|---|
+| **synthetic** | `memory-core-internal-retrieval` v1.0.0 | **us** | this directory |
+| **LongMemEval_S** | 500 questions, public | [Wu et al. 2024](https://arxiv.org/abs/2410.10813) | [`longmemeval/`](longmemeval/) |
+| **LoCoMo** | 10 conversations, 1,986 questions, public | [Maharana et al. 2024](https://arxiv.org/abs/2402.17753) | [`locomo/`](locomo/) |
+
+## The three rules that apply to all of them
+
+**1. The synthetic suite is ours, and it proves the least.** We wrote the corpus, so it
+can flatter our own systems. It is first in this file because it is the oldest, not
+because it is the strongest evidence. Treat any cross-system gap it shows as a
+hypothesis, not a result.
+
+**2. LongMemEval and LoCoMo are public *datasets* run through *our* harness. The numbers
+are not comparable to published leaderboard figures.** The datasets are the authors'; the
+retrieval granularity (one memory per conversation turn), the corpus construction, the
+reader model, the judge model and every prompt are ours. A number from the LongMemEval or
+LoCoMo paper, from a leaderboard, or from any vendor's blog post was measured differently
+and **must never be placed in a table next to ours.** Cite it in prose, attributed, or not
+at all. The only valid comparisons are *within* one of our reports, because every row in
+one report went through the same harness over the same corpus with the same metric
+definitions.
+
+The one third-party system we do compare against directly — **mem0 OSS 2.0.14** on
+LoCoMo — was run **by us, through this harness**, not quoted from mem0's materials. That
+is what makes it a legitimate row rather than a borrowed number.
+
+**3. Every published number traces to a committed artifact.** See
+[Which artifact backs which table](#which-artifact-backs-which-table) below.
+
+---
+
+## 1. Synthetic suite — our dataset, weakest evidence
+
+*Everything from here to [section 2](#2-longmemeval_s--public-dataset-our-harness) documents this suite only.*
 
 The dataset is **synthetic and authored inside this repository**. Its internal name is
 `memory-core-internal-retrieval` (MCIR).
 
 - **It is NOT LongMemEval.** It is not LoCoMo, not MemGPT's suite, not any published
   benchmark. Numbers produced here are **not comparable** to published scores on those
-  suites, and must never be presented as if they were.
+  suites, and must never be presented as if they were. Our runs over the real
+  LongMemEval and LoCoMo datasets live in [`longmemeval/`](longmemeval/) and
+  [`locomo/`](locomo/) — separate harnesses, separate data, separate numbers.
 - If you cite a number from here, label it as an internal synthetic suite and state the
   provenance line the runner prints: dataset name + version + hash + seed + size + git SHA.
 - The corpus is generated from sentence templates. It measures whether a retriever can
@@ -31,7 +67,7 @@ plain lexical matching.
 
 That any system is "good". A high score here is necessary but nowhere near sufficient.
 
-## Quick start
+### Quick start
 
 ```bash
 # generate the fixtures (deterministic; committed so runs are diffable)
@@ -49,7 +85,7 @@ npx tsx bench/run.ts --systems=in-memory,enhanced,bm25,random,naive-rag --size=s
 `bench/run.ts` generates the fixture automatically if it is missing, so a bare
 `npx tsx bench/run.ts` works from a clean checkout.
 
-### Flags
+#### Flags
 
 | flag | default | meaning |
 | --- | --- | --- |
@@ -61,7 +97,7 @@ npx tsx bench/run.ts --systems=in-memory,enhanced,bm25,random,naive-rag --size=s
 | `--embedder=hash\|bench-hash\|minilm` | `hash` | embedding backend for `naive-rag` |
 | `--time-anchor=<iso>` | UTC midnight of the run day | corpus timestamps are placed relative to this |
 
-## The six task families
+### The six task families
 
 These are the things that distinguish a memory system from a plain vector store. Every
 item carries a `distractorNote` in the fixture explaining its specific trap.
@@ -79,7 +115,7 @@ Additional difficulty applied to every answerable item: **4 anchor-noise memorie
 mention the item's entity but answer nothing. Without them, a bare entity-token match
 would put gold at rank 1 for free and every scorer would look excellent.
 
-### Label integrity
+#### Label integrity
 
 `validateDataset()` runs on every generate and every load, and **throws** rather than
 emitting a subtly broken corpus. It enforces:
@@ -99,7 +135,7 @@ emitting a subtly broken corpus. It enforces:
   are keyed to another benchmark's answer set; letting them fire here would hand one
   system free points and make the comparison dishonest.
 
-## Metrics
+### Metrics
 
 `bench/metrics.ts`. Design rule: **no metric here can be maximised by returning
 everything**, and none can look good on a ranking that carries no information.
@@ -120,7 +156,7 @@ everything**, and none can look good on a ranking that carries no information.
   table** from retrieval quality, and network-bound systems are flagged so their RTT
   never colours their quality numbers.
 
-### Abstention, and why there are two numbers
+#### Abstention, and why there are two numbers
 
 Score scales are not comparable across systems, so a single shared absolute threshold
 would be meaningless. Both numbers use the identical recipe for every system:
@@ -139,7 +175,7 @@ Note the framing: this measures **score calibration**, not refusal. Returning an
 memories for an unanswerable question is reasonable retrieval behaviour; being *as
 confident* on unanswerable queries as on answerable ones is not.
 
-### The random baseline is always printed
+#### The random baseline is always printed
 
 Non-negotiable. The `random` system runs even if you leave it out of `--systems`, and the
 runner also prints a closed-form `[analytic random]` row: `E[recall@k] = k/N`,
@@ -151,7 +187,7 @@ Any system whose `recall@10` is not convincingly above the analytic baseline get
 mean rank 2.5 on a 4-item corpus — exactly chance — and nothing in the repo would have
 revealed it.
 
-## Systems
+### Systems
 
 | name | what it is |
 | --- | --- |
@@ -169,7 +205,7 @@ Provider-backed systems are searched with `minScore: 0` so ranking metrics measu
 rather than an arbitrary default cutoff; the cutoff is then re-applied client-side for the
 `FPR@gate` operating point. One search call, both numbers.
 
-### `naive-rag` — important caveat about the embedder
+#### `naive-rag` — important caveat about the embedder
 
 It chunks **session transcripts** (400 chars, 100 overlap), not individual memories — that
 is what a plain vector store over conversation logs actually does, and it reproduces the
@@ -208,7 +244,7 @@ report has no `embedderResolved` field, you cannot tell which backend produced i
 property names (`id`/`dims` rather than `name`/`dimensions`); `bench/embedder.ts` adapts it
 rather than casting, so the report cannot print `embedder=undefined`.
 
-### `supermemory` — env vars
+#### `supermemory` — env vars
 
 Skips cleanly with `SUPERMEMORY_API_KEY not set, skipping` when unconfigured.
 
@@ -232,7 +268,7 @@ silently recorded as retrieval failure. Search is `POST /v4/search`, which retur
 `score`; do not share a parser between them). Teardown is a best-effort
 `DELETE /v3/documents/bulk` scoped to the run's container tag.
 
-## Reproducibility
+### Reproducibility
 
 - **The fixtures are deterministic.** Same `--size` and `--seed` produces a byte-identical
   JSON file. All randomness comes from a seeded PRNG (`bench/rng.ts`); there is no bare
@@ -259,6 +295,79 @@ silently recorded as retrieval failure. Search is `POST /v4/search`, which retur
   SHA, whether the tree was dirty, node version, platform, retrieval depth, embedder and
   time anchor, so any number can be traced back to the run that produced it.
 
+---
+
+## 2. LongMemEval_S — public dataset, our harness
+
+**[`longmemeval/`](longmemeval/README.md)** · dataset: **[`longmemeval/DATA.md`](longmemeval/DATA.md)**
+· evidence: **[`longmemeval/results/`](longmemeval/results/README.md)**
+
+```bash
+cd bench/longmemeval && npm install
+# download the dataset per DATA.md, then:
+./run-modeA.sh                          # retrieval only. Free, offline, ~20 min.
+./run-hybrid-subset.sh                  # hybrid retrieval, 150-question subset
+OPENROUTER_API_KEY=... ./run-modeB.sh   # QA + LLM judge. ~$0.86.
+```
+
+**Two configurations, two question sets, never one number.** The full-500 run
+(n = 479 scored) measures `memory-core` with **`embedder=none` — that row is BM25-only.**
+Hybrid retrieval was measured separately on a 150-question stratified subset
+(n = 142 scored) because embedding every haystack turn costs ~250 core-seconds per
+question. Those are different denominators and **must not be combined.** The QA-accuracy
+numbers are likewise produced on BM25-only retrieval; no Mode B run on hybrid retrieval
+exists, so no hybrid QA number should be quoted.
+
+## 3. LoCoMo — public dataset, our harness, head-to-head with mem0
+
+**[`locomo/`](locomo/README.md)** · dataset: **[`locomo/DATA.md`](locomo/DATA.md)**
+· evidence: **[`locomo/results/`](locomo/results/README.md)**
+
+```bash
+cd bench/locomo && npm install
+# download the dataset per DATA.md, then:
+./mode_a.sh                             # retrieval only. Free, offline, minutes.
+./mode_a.sh --with-hybrid               # also the embedder configurations
+./mode_a.sh --with-mem0                 # also mem0's LLM write path. Hours, ~$3.45.
+OPENROUTER_API_KEY=... ./mode_b.sh      # QA + LLM judge. ~$3.70.
+python3 oracle_matched.py               # matched denominators for the oracle comparison
+```
+
+mem0 is given one `add()` per dialogue turn (matching our granularity), its own default
+score gate is disabled the same way ours is, and at read time it is given its own
+consolidated memory texts rather than the original turns. Because mem0 rewrites and
+consolidates, its retrievals are mapped back to gold turns through **three** attribution
+channels — an exact one plus a deliberate lower and upper bound — and all three are in
+the report. The published row is the exact middle channel.
+
+---
+
+## Which artifact backs which table
+
+Every number in the repository README's "Retrieval quality" section traces to a file
+here. Nothing is quoted that is not committed.
+
+| README table / claim | artifact | n |
+|---|---|---|
+| Synthetic suite, 5-row system table | `out/*.json` from `run.ts` (regenerate: see Quick start) | 44 |
+| LongMemEval, 5-row system table | [`longmemeval/results/modeA-fast.json`](longmemeval/results/modeA-fast.json) | 479 |
+| LongMemEval, `rrfK=5` .8716 vs `rrfK=60` .8648 | [`longmemeval/results/modeA-hybridsub.json`](longmemeval/results/modeA-hybridsub.json) | 142 |
+| LongMemEval, hybrid vs BM25-only on equal footing | [`longmemeval/results/modeA-subset150.json`](longmemeval/results/modeA-subset150.json) | 142 |
+| LongMemEval, QA accuracy 62.6 / 69.5 / 82.0 % | [`longmemeval/results/modeB-full.json`](longmemeval/results/modeB-full.json) | 479 / 479 / 150 |
+| LongMemEval, deprecated-provider table | [`longmemeval/results/modeA-fast.json`](longmemeval/results/modeA-fast.json) | 479 |
+| LoCoMo, 5-row rank-metric table | [`locomo/results/mode_a.json`](locomo/results/mode_a.json) | 1,531 |
+| LoCoMo, matched-denominator QA (.485 / .476 / .451) | [`locomo/results/oracle_matched.txt`](locomo/results/oracle_matched.txt) | 233 |
+| LoCoMo, ingest-cost table | [`locomo/results/mode_a.json`](locomo/results/mode_a.json) → `.systems[].ingest` | — |
+
+Each `results/README.md` maps individual rows to individual JSON paths, and explains the
+sanity checks and the exclusions.
+
+Every artifact carries the git SHA it was produced at, the dataset sha256, the model ids
+and the command line. Infrastructure identifiers (the hostname and absolute paths of the
+machine the runs executed on) were rewritten to placeholders on import; each artifact
+discloses that in a `_redaction` field. No metric, denominator, hash or model id was
+altered.
+
 ## Layout
 
 ```
@@ -280,9 +389,24 @@ bench/
     provider.ts        any MemoryProvider from src/provider.ts
     bm25.ts  random.ts  naive-rag.ts  supermemory.ts
   out/                 per-run artifacts (gitignored)
+
+  longmemeval/         LongMemEval_S harness — see longmemeval/README.md
+    DATA.md            dataset source + sha256 (dataset itself NOT committed)
+    results/           committed evidence for the published tables
+    data/ work/ out/   gitignored
+  locomo/              LoCoMo harness incl. the mem0 head-to-head — see locomo/README.md
+    DATA.md            dataset source + sha256 (dataset itself NOT committed)
+    requirements.txt   Python deps for the mem0 comparison (own venv, not the root package.json)
+    results/           committed evidence for the published tables
+    data/ work/ out/   gitignored
 ```
 
-## A note on `enhanced`
+Both public-dataset harnesses carry their own `package.json` and `tsconfig.json`, and are
+deliberately **not** wired into the root `package.json`: a memory library should not carry
+a benchmark's dependency tree. Neither reads a secret from disk — `OPENROUTER_API_KEY`
+comes from the environment or the run fails with a message saying so.
+
+## Appendix: a note on `enhanced` (synthetic suite)
 
 This harness measures `MemoryProvider.search()`. The hardcoded gold-answer string in
 `src/providers/enhanced-provider.ts` (`extractIntelligentAnswer`, which returns the literal

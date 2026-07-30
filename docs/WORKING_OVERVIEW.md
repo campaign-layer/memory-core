@@ -1,6 +1,8 @@
 # Working overview
 
-What the code currently does, end to end. Verified against a running server.
+How a request flows through the code, end to end. Verified against a running server.
+
+The route table lives in the [README](../README.md#http-api); this file is the pipeline.
 
 ## Surfaces
 
@@ -10,23 +12,6 @@ What the code currently does, end to end. Verified against a running server.
 | MCP | `src/integrations/mcp-server.ts` — 6 tools, embedded or remote |
 | SDK | `MemoryCoreClient` (`src/client.ts`), or `MemoryCoreService` in-process |
 | Tool schemas | `toAnthropicTools()` / `toOpenAITools()` and adapters, from one zod source |
-
-## HTTP routes
-
-| Method | Route | Returns |
-|---|---|---|
-| `GET` | `/health` | `{ok, service, timestamp}` — liveness, unauthenticated |
-| `GET` | `/ready` | `{ok, service, provider:{ok, provider, detail}, timestamp}`; 503 if the provider is unhealthy |
-| `POST` | `/v1/memory/ingest` | `{created, updated, records[]}` |
-| `POST` | `/v1/memory/search` | `{count, hits:[{memory, score, reasons[]}]}` |
-| `GET` | `/v1/memory/search?q=&tenantId=&appId=&…` | same shape as POST |
-| `POST` | `/v1/memory/context` | `{profileSummary, selectedMemories[], contextText, totalMemories, processingTime}` |
-| `GET` | `/v1/memory/profile/:tenantId/:appId/:actorId` | `{tenantId, appId, actorId, byType, summary, count}` |
-| `POST` | `/v1/memory/feedback` | `{updated}` |
-| `POST` | `/v1/memory/compact` | `{archivedExpired, archivedSuperseded}` |
-
-There is no `/metrics`, no `/admin/*`, no `/v1/memory/export` and no `/v1/memory/import`.
-Earlier docs listed all of those; they return 404.
 
 ## Request pipeline
 
@@ -55,11 +40,17 @@ Earlier docs listed all of those; they return 404.
    `importance`, keep the existing summary, shallow-merge metadata, `provider.update()`.
 5. Otherwise `provider.ingest([candidate])`.
 
-**What is not here:** no extraction from raw turns, no semantic dedupe, no contradiction
-detection, no supersession. Step 3 is the whole resolution stage, and because it is exact
-string equality, a revised fact is stored alongside the stale one with both `active` and both
-permanently retrievable. This is the measured cause of the knowledge-update failures in
-[`BENCHMARKS.md`](./BENCHMARKS.md).
+**What is not here:** no semantic dedupe, no contradiction detection, no supersession. Step 3
+is the whole resolution stage, and because it is exact string equality, a revised fact is
+stored alongside the stale one with both `active` and both permanently retrievable. This is
+the measured cause of the knowledge-update failures in [`BENCHMARKS.md`](./BENCHMARKS.md).
+
+**Extraction** sits in front of step 1 and is **off by default**. `MEMORY_EXTRACTOR=none`
+selects a passthrough that turns each observation into exactly one fact with its text
+unchanged, so the default write path is byte-identical to the pre-extraction behaviour.
+`MEMORY_EXTRACTOR=llm` sends turns to an OpenAI-compatible chat endpoint to be distilled into
+atomic statements first. **No benchmark on this project has been run with extraction on** —
+see [`BENCHMARKS.md`](./BENCHMARKS.md#what-this-page-does-not-cover).
 
 ## Read path
 
@@ -67,11 +58,22 @@ permanently retrievable. This is the measured cause of the knowledge-update fail
 
 1. `filters.tenantId` and `filters.appId` are required — providers throw on an unscoped query.
 2. Hard filters first: tenant, app, then optional actor, thread, memoryTypes, scope, metadata.
+   These are applied *inside* each candidate scan, so scoping precedes ranking.
 3. Decay-expired records are excluded lazily at read time.
-4. Provider-specific ranking (formulas in [`providers.md`](./providers.md)). Scores are
-   contractually 0–1.
-5. Drop anything below `minScore` (provider-specific default), sort by score then `updatedAt`
+4. Candidate generation. With no embedder configured this is BM25 alone; with one, BM25 and
+   vector cosine run as two independent rankers and are fused by Reciprocal Rank Fusion
+   (`rrfK` 5 in-process, 60 in Postgres).
+5. Provider-specific re-weighting by recency, confidence, importance and feedback (formulas in
+   [`providers.md`](./providers.md)). Scores are contractually 0–1.
+6. Drop anything below `minScore` (provider-specific default), sort by score then `updatedAt`
    descending, slice to `limit` (max 100).
+
+If the embedder throws at step 4, the in-process providers log once, disable it for a
+cooldown, and fall back to the lexical path rather than failing the request.
+
+There is **no reranking and no diversification** on this path — `src/retrieval/rerank.ts` and
+`src/retrieval/mmr.ts` exist and are called by nothing. There is no multi-hop: one query, one
+round of candidates.
 
 `buildContext`:
 
@@ -108,11 +110,12 @@ Response fields: `profileSummary`, `selectedMemories[{id, memoryType, text, scor
 
 ## Providers
 
-`in-memory` (default), `file`, `enhanced`, `dual-layer`, `postgres`. There is **no `mem0`
-provider** — earlier revisions of this file listed one; it has never existed in this repo.
+`in-memory` (default), `file`, `enhanced` (deprecated), `dual-layer` (deprecated), `postgres`.
+There is **no `mem0` provider** — earlier revisions of this file listed one; it has never
+existed in this repo. mem0 appears in [`BENCHMARKS.md`](./BENCHMARKS.md) as a system we
+measured against, not as a backend you can select.
 
 See [`providers.md`](./providers.md) for storage, ranking formulas and measured quality.
-`enhanced` is the worst-measured real provider and is not recommended.
 
 ## Security and runtime controls
 
@@ -123,4 +126,5 @@ See [`providers.md`](./providers.md) for storage, ranking formulas and measured 
 - No CORS policy and no security headers.
 - Graceful shutdown on SIGINT/SIGTERM, closing the provider (pg pool, timers, pending writes).
 
-Full gap list: [`PRODUCTION_READINESS.md`](./PRODUCTION_READINESS.md).
+Full gap list:
+[`deployment.md`](./deployment.md#limits-to-know-before-you-deploy).

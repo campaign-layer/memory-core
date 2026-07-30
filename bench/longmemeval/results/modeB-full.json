@@ -1,0 +1,254 @@
+{
+  "_redaction": "Infrastructure identifiers were rewritten when this artifact was imported into the public repository: the machine hostname, and absolute filesystem paths on the single-purpose Linux box the run executed on, were replaced with repo-relative equivalents and placeholders. NOTHING that a reader can verify was changed: the git SHA, the dataset sha256/byte count, the model ids, every metric, every denominator, and the full argument list of each command line are byte-identical to what the harness emitted. Path values are still distinct-valued, so the mixed-checkout and mixed-SHA guards in the report remain meaningful.",
+  "mode": "B-qa-with-llm-judge",
+  "tag": "full",
+  "provenance": {
+    "capturedAt": "2026-07-29T12:40:40.954Z",
+    "host": "<redacted-host>",
+    "nodeVersion": "v22.14.0",
+    "repo": {
+      "root": "<memory-core-checkout>",
+      "sha": "5ea385230b8ac0066e91a9847aedecf05eebdc97",
+      "branch": "HEAD",
+      "dirty": false
+    },
+    "dataset": {
+      "file": "bench/longmemeval/data/longmemeval_s.json",
+      "bytes": 278025796,
+      "sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894"
+    },
+    "commandLine": "node bench/longmemeval/modeB.ts --conditions=k10,k30,oracle --concurrency=8 --tag=full --oracle-n=150",
+    "cwd": "bench/longmemeval"
+  },
+  "model": {
+    "answerer": "deepseek/deepseek-v4-flash",
+    "judge": "deepseek/deepseek-v4-flash",
+    "temperature": 0,
+    "answerMaxTokens": 900,
+    "judgeMaxTokens": 400,
+    "reasoning": "NOT disabled. This is a reasoning model and a small fraction of calls return content=null; those are retried (which re-rolls OpenRouter's upstream) and, if content is still empty, the answer is recovered from the reasoning trace. Empty content is never scored as a wrong answer. See conditions[].answersRecoveredFromReasoning and conditions[].errors."
+  },
+  "retrievalProvenance": {
+    "system": "memory-core",
+    "repoShas": [
+      "5ea385230b8ac0066e91a9847aedecf05eebdc97"
+    ],
+    "repoRoots": [
+      "<memory-core-checkout>"
+    ]
+  },
+  "protocol": {
+    "retrievalFrom": "Mode A ranking of system \"memory-core\"",
+    "contextFormat": "[i] <session date> | <role>: <content>",
+    "questionDateGivenToReader": true,
+    "abstentionAllowed": "answerer may reply \"I don't know\"",
+    "judgeAnswerable": "binary CORRECT/INCORRECT, strict; \"I don't know\" is INCORRECT",
+    "judgePreference": "single-session-preference is a personalisation task, not short-answer: its gold is a rubric describing the preference a good response must reflect, so it gets its own answerer prompt and its own judge rubric. Prompts branch on question_type only, never on the answer.",
+    "judgeAbstention": "separate rubric for the 21 *_abs questions: correctly declining is CORRECT, fabricating an answer is INCORRECT",
+    "judgeSeesContext": false,
+    "oracleSubsample": "answerable only, stratified by question_type, n\u2248150, deterministic",
+    "maxMemoryChars": 8000,
+    "memoryTruncationsThisRun": 0,
+    "providerRouting": "OpenRouter default routing; the serving upstream varies per call and is recorded per row"
+  },
+  "conditions": {
+    "k10": {
+      "rows": 500,
+      "errors": 0,
+      "answerable": {
+        "n": 479,
+        "correct": 300,
+        "accuracy": 0.6263048016701461,
+        "saidIdk": 121,
+        "perType": {
+          "temporal-reasoning": {
+            "n": 132,
+            "correct": 72,
+            "accuracy": 0.5454545454545454
+          },
+          "multi-session": {
+            "n": 125,
+            "correct": 50,
+            "accuracy": 0.4
+          },
+          "knowledge-update": {
+            "n": 72,
+            "correct": 55,
+            "accuracy": 0.7638888888888888
+          },
+          "single-session-user": {
+            "n": 64,
+            "correct": 55,
+            "accuracy": 0.859375
+          },
+          "single-session-assistant": {
+            "n": 56,
+            "correct": 52,
+            "accuracy": 0.9285714285714286
+          },
+          "single-session-preference": {
+            "n": 30,
+            "correct": 16,
+            "accuracy": 0.5333333333333333
+          }
+        }
+      },
+      "abstention": {
+        "n": 21,
+        "correct": 20,
+        "accuracy": 0.9523809523809523
+      },
+      "judgeFormatViolations": 7,
+      "answersRecoveredFromReasoning": 6,
+      "meanContextChars": 12351.682,
+      "tokens": {
+        "prompt": 1556788,
+        "completion": 122509
+      },
+      "costUsd": 0.22756124899999977,
+      "costSource": "openrouter usage.cost",
+      "errorSamples": []
+    },
+    "k30": {
+      "rows": 500,
+      "errors": 0,
+      "answerable": {
+        "n": 479,
+        "correct": 333,
+        "accuracy": 0.6951983298538622,
+        "saidIdk": 88,
+        "perType": {
+          "temporal-reasoning": {
+            "n": 132,
+            "correct": 82,
+            "accuracy": 0.6212121212121212
+          },
+          "multi-session": {
+            "n": 125,
+            "correct": 62,
+            "accuracy": 0.496
+          },
+          "knowledge-update": {
+            "n": 72,
+            "correct": 56,
+            "accuracy": 0.7777777777777778
+          },
+          "single-session-user": {
+            "n": 64,
+            "correct": 59,
+            "accuracy": 0.921875
+          },
+          "single-session-assistant": {
+            "n": 56,
+            "correct": 54,
+            "accuracy": 0.9642857142857143
+          },
+          "single-session-preference": {
+            "n": 30,
+            "correct": 20,
+            "accuracy": 0.6666666666666666
+          }
+        }
+      },
+      "abstention": {
+        "n": 21,
+        "correct": 19,
+        "accuracy": 0.9047619047619048
+      },
+      "judgeFormatViolations": 5,
+      "answersRecoveredFromReasoning": 13,
+      "meanContextChars": 39292.35,
+      "tokens": {
+        "prompt": 4512648,
+        "completion": 145249
+      },
+      "costUsd": 0.6107598543600005,
+      "costSource": "openrouter usage.cost",
+      "errorSamples": []
+    },
+    "oracle": {
+      "rows": 150,
+      "errors": 0,
+      "answerable": {
+        "n": 150,
+        "correct": 123,
+        "accuracy": 0.82,
+        "saidIdk": 15,
+        "perType": {
+          "temporal-reasoning": {
+            "n": 41,
+            "correct": 31,
+            "accuracy": 0.7560975609756098
+          },
+          "multi-session": {
+            "n": 39,
+            "correct": 28,
+            "accuracy": 0.717948717948718
+          },
+          "knowledge-update": {
+            "n": 23,
+            "correct": 18,
+            "accuracy": 0.782608695652174
+          },
+          "single-session-user": {
+            "n": 20,
+            "correct": 19,
+            "accuracy": 0.95
+          },
+          "single-session-assistant": {
+            "n": 18,
+            "correct": 18,
+            "accuracy": 1
+          },
+          "single-session-preference": {
+            "n": 9,
+            "correct": 9,
+            "accuracy": 1
+          }
+        }
+      },
+      "abstention": {
+        "n": 0,
+        "correct": 0,
+        "accuracy": null
+      },
+      "judgeFormatViolations": 1,
+      "answersRecoveredFromReasoning": 0,
+      "meanContextChars": 743.0133333333333,
+      "tokens": {
+        "prompt": 83529,
+        "completion": 26251
+      },
+      "costUsd": 0.016757878560000005,
+      "costSource": "openrouter usage.cost",
+      "errorSamples": []
+    }
+  },
+  "totals": {
+    "promptTokens": 6152965,
+    "completionTokens": 294009,
+    "costUsd": 0.8550789819200002,
+    "wallClockSec": 0.064
+  },
+  "providerCounts": {
+    "Alibaba": 180,
+    "DeepInfra": 71,
+    "Cloudflare": 166,
+    "GMICloud": 346,
+    "Morph": 145,
+    "Venice": 100,
+    "CoreWeave": 145,
+    "StreamLake": 182,
+    "SiliconFlow": 191,
+    "Io Net": 150,
+    "AtlasCloud": 147,
+    "DigitalOcean": 97,
+    "Ambient": 140,
+    "Novita": 75,
+    "Ionstream": 78,
+    "Mancer 2": 48,
+    "AkashML": 36,
+    "Baidu": 1,
+    "Fireworks": 2
+  }
+}

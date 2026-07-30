@@ -19,7 +19,7 @@ because the reasoning still explains *why* the design was wrong.
 | No semantic retrieval reachable from config | `MEMORY_EMBEDDER` selects none/local/hash/voyage/openai; hybrid BM25+vector RRF in the in-memory and file providers, and pgvector HNSW now reachable for postgres |
 | `processingTime: Date.now() - Date.now()` | Real timing via `performance.now()` |
 | `MEMORY_PROVIDER=dual-layer` crashed at boot | Config enum derived from `MemoryProviderKind` |
-| Dockerfile installed prod deps then ran `tsc` | Multi-stage build (note: Railway builds with Railpack and never reads it) |
+| Dockerfile installed prod deps then ran `tsc` | Multi-stage build (note: PaaS builders that autodetect Node ignore the Dockerfile entirely) |
 | Benchmark-overfit gazetteers and a hardcoded gold answer | Deleted; the string was verbatim LongMemEval question 1's answer |
 
 **Measured retrieval quality** (see `docs/BENCHMARKS.md` for commands)
@@ -28,7 +28,8 @@ because the reasoning still explains *why* the design was wrong.
 |---|---|---|---|
 | LoCoMo, n=1,531, R@10 | 0.626 | **0.709** | mem0 OSS 0.694 |
 | LoCoMo, n=1,531, R@1 | 0.332 | 0.344 | mem0 OSS **0.345** |
-| LongMemEval, n=479, R@10 | 0.780 (bm25 baseline) | pending | — |
+| LongMemEval, n=479, R@10 | 0.780 (bm25 baseline) | **0.802** (memory-core) | — |
+| LongMemEval, n=479, R@1 | **0.362** (bm25 baseline) | 0.343 (memory-core) | — |
 
 **What the numbers changed about the plan**
 
