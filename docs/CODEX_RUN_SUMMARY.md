@@ -355,3 +355,77 @@ the executable quickstart and adds the existing MCP lifecycle verifier to CI.
   Codex, or Hermes host through the full shared-service scenario.
 - Representative migration/load, multi-replica chaos, backup/restore, distributed quota,
   audit export, and held-out abstention/temporal targets remain release gates.
+
+## Run: 2026-08-30 00:09 (IST)
+
+### Scope
+
+Implement the smallest safe P0-A prerequisite for the proposed V2 ledger, challenge the
+architecture with local Kimi, keep the local Claude/Codex/Hermes self-hosting path accurate,
+run the full local validation matrix, and prepare the branch for GitHub and Codex Cloud.
+
+### Changes
+
+- Changed the configured server default from all interfaces to `127.0.0.1`. An
+  unauthenticated non-loopback listener now fails closed unless the explicit development-only
+  override is enabled. `MEMORY_ENV=production` rejects that override and requires credentials,
+  Postgres, an explicit database URL, and application auto-migration disabled.
+- Hardened `MemoryCoreClient`: absolute URL validation, no URL credentials/query/fragment,
+  HTTPS outside literal loopback, redirects rejected, a 10-second whole-response deadline,
+  deterministic deadline errors, and a 1 MiB default response limit.
+- Hardened hosted embedder/reranker/extractor transport: redirects rejected; fetch, body read,
+  retry sleeps, and all attempts share one deadline; response bodies are bounded; server
+  `Retry-After` is clamped. Timeout-induced transport errors normalize to the declared
+  deadline error.
+- Kept failed extraction and successful no-accepted-facts windows as operator-searchable raw
+  evidence, labelled them separately as `fallback` and `no_facts`, and excluded both from
+  prompt assembly by default. The deprecated enhanced-provider prompt path enforces the same
+  quarantine.
+- Updated deployment, working-overview, and root documentation for safe local hosting,
+  Docker/Kubernetes bind requirements, the production startup matrix, and current transport
+  behavior.
+- Incorporated Kimi's architecture corrections: authoritative durable resolution decisions,
+  same-scope-only uniqueness, explicit recorded/effective-time precedence, deterministic
+  legacy collision reconciliation, and a concrete fsync/rename/fsync file snapshot boundary.
+
+### Kimi Review
+
+- One local `kimi-code/k3` architecture turn completed and returned **MODIFY**: the relational
+  evidence ledger plus bounded relation projection is the right minimal core, but a
+  rebuildable graph projection must never decide conflict suppression, quarantine, access, or
+  prompt admission.
+- Kimi also rejected an overbroad uniqueness claim, requested explicit bitemporal ordering and
+  legacy collision policy, and required the file snapshot to publish heads, idempotency
+  operations, and outbox atomically. The architecture document now reflects each point.
+- Further Kimi source/test review is not represented as complete. The installed CLI uses the
+  external `api.kimi.com` endpoint, and transmitting repository source requires explicit user
+  approval after that boundary is disclosed.
+
+### Validation
+
+- Node 20 and Node 22 full unit/integration runs each report 180 outcomes: 179 passed, one
+  opt-in ONNX semantic test skipped, zero failed. The final post-review focused suite passes
+  82/82.
+- TypeScript application and benchmark typechecks, production build, `git diff --check`, and
+  quickstart JavaScript syntax pass.
+- Embedded MCP end to end passes six-tool discovery, remember/recall/context/feedback,
+  restart persistence, supersede, forget, and clean resource release. Hermes Python contracts
+  pass 4/4; generated Hermes schemas and both generated benchmark fixtures are byte-stable.
+- Postgres reports 31 outcomes: 24 passed and seven pgvector-only cases skipped because the
+  locally reachable server has no vector extension. Docker Desktop did not expose a usable
+  daemon, leaving the clean pgvector and production-container checks to GitHub CI.
+- Internal retrieval gate passes: in-memory R@1 40.9%, R@10 89.8%, MRR 0.615, nDCG@10 0.648.
+  Context evidence recall is 0.7692 with no budget violations. Stale-over-current remains
+  0.375 and abstention leakage remains 1.0; this slice makes no quality/SOTA claim.
+
+### Handoff / Remaining Gates
+
+- P0-B remains the next implementation slice: V2 evidence/series/version/head tables,
+  persisted idempotency, atomic batch ingest, CAS revision, transactional audit/outbox, and
+  single-writer crash-safe file snapshots.
+- Production-ready remains blocked on durable audit, shared quotas, backup/restore and
+  multi-replica drills, representative held-out context quality, pgvector/container CI, and
+  the transactional V2 mutation core.
+- The authenticated Codex Cloud CLI has no environment for `campaign-layer/memory-core`.
+  No task was submitted to an unrelated repository; create/connect that environment or supply
+  its environment id before handing this branch to Cloud.

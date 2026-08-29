@@ -57,8 +57,12 @@ the measured cause of the knowledge-update failures in [`BENCHMARKS.md`](./BENCH
 selects a passthrough that turns each observation into exactly one fact with its text
 unchanged, so the default write path is byte-identical to the pre-extraction behaviour.
 `MEMORY_EXTRACTOR=llm` sends turns to an OpenAI-compatible chat endpoint to be distilled into
-atomic statements first. **No benchmark on this project has been run with extraction on** —
-see [`BENCHMARKS.md`](./BENCHMARKS.md#what-this-page-does-not-cover).
+atomic statements first. If extraction throws, the raw input is retained with
+`extractionOrigin=fallback`; a successful window with no accepted facts is retained as
+`extractionOrigin=no_facts`. Both remain operator-searchable evidence but are excluded from
+`buildContext` and the deprecated enhanced-provider prompt path by default. **No benchmark on
+this project has been run with extraction on** — see
+[`BENCHMARKS.md`](./BENCHMARKS.md#what-this-page-does-not-cover).
 
 ## Read path
 
@@ -93,7 +97,9 @@ evidence and abstention are higher-priority precision failures.
 
 1. Clamp the budget: `maxItems` 1–30 (default 8), `maxChars` 300–20000 (default 3000).
 2. `search()` with `limit = maxItems * 2`.
-3. Fit query-relevant hits first, in score order, counting the exact rendered lines, header,
+3. Remove failed/no-facts extraction evidence unless the in-process caller explicitly enables
+   the legacy `includeUnverified` escape hatch. Fit query-relevant hits first, in score order,
+   counting the exact rendered lines, header,
    and separators. There is still **no measured diversity policy**, so near-duplicates can
    consume the relevant portion. Budget is counted in **characters, not model tokens**.
 4. If `filters.actorId` is set, the service calls `listVisible()` on every context build. Each
@@ -138,10 +144,16 @@ See [`providers.md`](./providers.md) for storage, ranking formulas and measured 
 
 ## Security and runtime controls
 
-- Optional API key auth on `/v1/*`: `MEMORY_CORE_PRINCIPAL_API_KEYS` binds normal agents to
+- The configured server defaults to `HOST=127.0.0.1`. Without credentials, a non-loopback
+  listener fails startup unless the development-only insecure-listen override is explicit.
+  `MEMORY_ENV=production` requires Postgres, an explicit database URL, credentials, and
+  application auto-migration disabled.
+- Optional API key auth on loopback `/v1/*`: `MEMORY_CORE_PRINCIPAL_API_KEYS` binds normal agents to
   one tenant/space/app/actor principal; `MEMORY_CORE_TENANT_API_KEYS` is privileged tenant
   administrator/identity-assertor access; `MEMORY_CORE_API_KEYS` is global operator access.
-  Empty settings mean no authentication.
+  Empty settings mean no authentication only within the listener rule above.
+- `MemoryCoreClient` requires HTTPS except for literal loopback, rejects redirects and URL
+  credentials, and bounds the complete response deadline and bytes.
 - Per-identity rate limit via `MEMORY_RATE_LIMIT_PER_MIN`, **per process**. Reverse-proxy
   addresses are trusted only when `MEMORY_TRUST_PROXY_HOPS` is configured.
 - Baseline security/no-store headers are set. There is no CORS policy, CSP, or TLS.

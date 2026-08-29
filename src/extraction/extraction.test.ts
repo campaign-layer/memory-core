@@ -272,6 +272,32 @@ test("an extractor that throws outright still stores every raw observation", asy
   const result = await service.ingest({ observations: [observation("I live in Berlin")] });
   assert.equal(result.created, 1);
   assert.equal(result.records[0].text, "I live in Berlin");
+  assert.equal(result.records[0].source.metadata?.extractionOrigin, "fallback");
+
+  const context = await service.buildContext({
+    query: "where do I live",
+    filters: { tenantId: TENANT.tenantId, appId: TENANT.appId, actorId: "caroline" },
+  });
+  assert.equal(context.selectedMemories.length, 0, "failed extraction must never become prompt-visible");
+});
+
+test("a successful no-facts extraction is distinct from failure and remains out of prompts", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider, {
+    extractor: {
+      id: "empty-but-healthy",
+      extract: async () => [],
+    },
+  });
+
+  const result = await service.ingest({ observations: [observation("thanks, sounds good")] });
+  assert.equal(result.created, 1, "raw evidence remains available for operator inspection");
+  assert.equal(result.records[0].source.metadata?.extractionOrigin, "no_facts");
+  const context = await service.buildContext({
+    query: "what did I agree to",
+    filters: { tenantId: TENANT.tenantId, appId: TENANT.appId, actorId: "caroline" },
+  });
+  assert.equal(context.selectedMemories.length, 0);
 });
 
 test("extraction windows never mix visibility scopes", async () => {

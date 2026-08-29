@@ -12,21 +12,102 @@ import type {
 } from "./types.js";
 import type { MemoryIdScope } from "./provider.js";
 
-interface MemoryCoreClientOptions {
+export interface MemoryCoreClientOptions {
   baseUrl: string;
   apiKey?: string;
   fetchImpl?: typeof fetch;
+  /** Whole-operation deadline, including response-body parsing. Default 10 seconds. */
+  timeoutMs?: number;
+  /** Maximum response body accepted before parsing. Default 1 MiB. */
+  maxResponseBytes?: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+function isLoopback(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost"
+    || normalized === "[::1]"
+    || normalized === "::1"
+    || /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
+
+function normalizeBaseUrl(input: string): string {
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch (cause) {
+    throw new TypeError("memory-core baseUrl must be an absolute URL", { cause });
+  }
+  if (url.username || url.password) {
+    throw new TypeError("memory-core baseUrl must not contain credentials");
+  }
+  if (url.search || url.hash) {
+    throw new TypeError("memory-core baseUrl must not contain a query string or fragment");
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url.hostname))) {
+    throw new TypeError("memory-core baseUrl must use HTTPS except for loopback development");
+  }
+  return url.toString().replace(/\/+$/, "");
+}
+
+function boundedInteger(value: number | undefined, fallback: number, name: string, max: number): number {
+  const resolved = value ?? fallback;
+  if (!Number.isInteger(resolved) || resolved < 1 || resolved > max) {
+    throw new RangeError(`${name} must be an integer in 1..${max}`);
+  }
+  return resolved;
+}
+
+async function readJsonBody(response: Response, maxBytes: number): Promise<unknown> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(`response body exceeds ${maxBytes} bytes`);
+  }
+  if (!response.body) return {};
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`response body exceeds ${maxBytes} bytes`);
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (cause) {
+    throw new Error("memory-core returned an invalid JSON response", { cause });
+  }
 }
 
 export class MemoryCoreClient {
   private readonly baseUrl: string;
   private readonly apiKey?: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
+  private readonly maxResponseBytes: number;
 
   constructor(options: MemoryCoreClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.apiKey = options.apiKey;
     this.fetchImpl = options.fetchImpl || fetch;
+    this.timeoutMs = boundedInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS, "timeoutMs", 120_000);
+    this.maxResponseBytes = boundedInteger(
+      options.maxResponseBytes,
+      DEFAULT_MAX_RESPONSE_BYTES,
+      "maxResponseBytes",
+      16 * 1024 * 1024,
+    );
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -34,18 +115,45 @@ export class MemoryCoreClient {
     headers.set("content-type", "application/json");
     if (this.apiKey) headers.set("x-api-key", this.apiKey);
 
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers,
+    const controller = new AbortController();
+    const deadlineError = new Error(`memory-core request deadline exceeded after ${this.timeoutMs}ms`);
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    let timedOut = false;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      deadlineTimer = setTimeout(() => {
+        timedOut = true;
+        controller.abort(deadlineError);
+        reject(deadlineError);
+      }, this.timeoutMs);
     });
 
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = body?.message || `HTTP ${response.status}`;
-      throw new Error(`memory-core request failed: ${message}`);
+    try {
+      const response = await Promise.race([
+        this.fetchImpl(`${this.baseUrl}${path}`, {
+          ...init,
+          headers,
+          redirect: "error",
+          signal: controller.signal,
+        }),
+        deadline,
+      ]);
+      const body = await Promise.race([readJsonBody(response, this.maxResponseBytes), deadline]);
+      if (!response.ok) {
+        const message = body && typeof body === "object" && "message" in body
+          ? String((body as { message?: unknown }).message || `HTTP ${response.status}`)
+          : `HTTP ${response.status}`;
+        throw new Error(`memory-core request failed: ${message}`);
+      }
+      return body as T;
+    } catch (error) {
+      // Native fetch/body streams may surface their own AbortError before the
+      // deadline promise wins the race. Keep the public failure deterministic.
+      if (timedOut) throw deadlineError;
+      throw error;
+    } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      controller.abort();
     }
-
-    return body as T;
   }
 
   ingest(input: MemoryIngestRequest) {

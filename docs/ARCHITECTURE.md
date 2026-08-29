@@ -103,24 +103,26 @@ single-shot: no multi-hop.
 
 Status: **proposed; production release remains blocked**.
 
-This design incorporates the current benchmark and sandbox evidence plus independently
-reproduced findings recovered from an incomplete local Kimi review. A new live Kimi
-architecture dialogue was attempted, but the local provider returned its five-hour quota
-error before producing a proposal. Nothing in this section is represented as Kimi sign-off;
-it is written as an ADR-grade brief that can be challenged verbatim when the quota resets.
+This design incorporates the current benchmark and sandbox evidence plus one completed local
+Kimi architecture turn. Kimi returned **MODIFY**: retain the ledger plus bounded relation
+projection, but do not let a rebuildable projection decide prompt visibility or truth; narrow
+the uniqueness claim to one exact visibility tuple; define bitemporal precedence, legacy
+collision handling, and the file crash boundary. Those changes are incorporated below.
+Follow-up source-level Kimi review is paused pending explicit approval to transmit relevant
+source and tests to the CLI's external `api.kimi.com` endpoint. This is not Kimi sign-off.
 
 ### Complete current gap register
 
 | Priority | Current gap | Required invariant |
 |---|---|---|
-| P1 | Default HTTP bind is `0.0.0.0`; empty key configuration disables auth | Loopback by default; non-loopback without credentials must fail closed |
-| P1 | `MemoryCoreClient` follows redirects with `x-api-key` and has no whole-request deadline | Reject redirects, bound the operation, require HTTPS except loopback |
-| P2 | Extractor exceptions can admit raw, unlabelled text to prompt context | Failed extraction stores evidence only; no prompt-eligible claim is created |
+| P0-A closed | Configured server defaults to loopback and rejects an unauthenticated non-loopback bind | Preserve the startup matrix and its production-mode tests |
+| P0-A closed | `MemoryCoreClient` now rejects redirects, bounds the whole response and body, and requires HTTPS except loopback | Preserve redirect/deadline/body/URL tests |
+| P0-A containment | Extractor exceptions and successful no-facts windows are distinctly labelled and excluded from prompts by default | Replace V1 containment with durable V2 evidence/candidate state |
 | P2 | Dedupe and writes are TOCTOU; concurrent identical ingest duplicates and a batch can partially commit | One idempotent, all-or-nothing store command |
 | P2 | Remote supersede is create → feedback → retire across requests | One compare-and-swap revision transaction |
 | P2 | Extracted facts retain transient turn indexes but not durable source text/spans | Every accepted version links to immutable evidence ids and hashes/spans |
 | P2 | Direct provider `getById` can be called without a scope | Every store operation requires a resolved access context |
-| P2 | Hosted `Retry-After` can exceed configured retry/backoff intent | Clamp sleep and all retries to one operation deadline |
+| P0-A closed | Hosted model transports clamp `Retry-After`, reject redirects, bound bodies, and share one deadline across fetch/body/retry sleep | Preserve adversarial transport tests |
 | P2 | Migration 002 performs a full backfill and non-concurrent index builds in one rollout transaction | Expand/migrate/contract; heavy work runs in a dedicated migrator |
 | P2 | Benchmark artifacts omit or contradict SHA/dirty/provider/RRF configuration | Release artifacts carry a complete, clean, reproducible manifest |
 | Quality | Large context regression selected stale evidence and leaked on every abstention case | Search current accepted heads; return explicit answerable/abstain/conflict state |
@@ -145,10 +147,12 @@ The smallest coherent design is a deterministic state machine around four durabl
    retrieval.
 
 An optional narrow relation projection may record `supports`, `contradicts`, `duplicates`,
-and `derived_from`. It is rebuildable and never authoritative for access or current-head
-selection; predecessor revision plus the head event are the authoritative supersession
-record. This is not a graph database, ontology, or license for an LLM to rewrite truth.
-Similarity may propose a relation; only a validated command may advance the current head.
+and `derived_from`. It is rebuildable and never authoritative for access, current-head
+selection, conflict suppression, quarantine, or prompt admission. Predecessor revision plus
+the head event are the authoritative supersession record; durable resolution decisions are
+the authoritative conflict/admission record. This is not a graph database, ontology, or
+license for an LLM to rewrite truth. Similarity may propose a relation; only a validated
+command may record a decision or advance the current head.
 
 ```text
 Agent surfaces: Claude / Codex / Hermes / REST / SDK
@@ -170,8 +174,11 @@ Agent surfaces: Claude / Codex / Hermes / REST / SDK
 ```
 
 Postgres remains the production store. In-memory implements the same command semantics under
-one mutex for tests. File mode uses one process lock and copy-on-write snapshot publication;
-it is a local single-writer option, never a multi-replica database.
+one mutex for tests. File mode uses one process lock and copy-on-write snapshot publication:
+write one complete temporary snapshot containing heads, operations, and outbox, fsync it,
+atomically rename it, then fsync the parent directory. Recovery observes the complete old or
+new snapshot, never a mixture. It is a local single-writer option, never a multi-replica
+database.
 
 ### Storage contract
 
@@ -186,6 +193,8 @@ The expand-only V2 schema should contain:
 - `memory_version_evidence`: version ↔ observation links with source hash and optional spans;
 - optional `memory_relations`: the bounded, rebuildable relation vocabulary above,
   version-aware where necessary;
+- `memory_resolution_decisions`: authoritative admit/quarantine/reject/conflict decisions,
+  policy version, inputs, reason codes, and deciding principal or deterministic rule;
 - `memory_head_events`: append-only created/revised/retired transitions for audit and `asOf`;
 - `memory_candidates` plus extraction jobs: pending/quarantined/rejected derived output;
 - `memory_operations`: `(tenant, principal, idempotencyKey)` plus request hash, operation id,
@@ -193,9 +202,10 @@ The expand-only V2 schema should contain:
 - an audit/outbox record committed in the same transaction as each mutation.
 
 Embeddings attach to immutable `versionId`, not the logical series. Normal retrieval indexes
-only current, accepted, non-expired heads. A unique active-content constraint over the exact
-visibility tuple, memory type, and normalized content hash closes the concurrent exact-dedupe
-race.
+only current, accepted, non-expired heads. A unique active-content constraint over one exact
+visibility tuple, memory type, and normalized content hash closes only the same-scope
+concurrent exact-dedupe race. It does not merge actor/app/workspace/tenant copies; any
+cross-scope promotion or merge requires an explicit policy command and auditable decision.
 
 ### Access and transport contract
 
@@ -215,10 +225,10 @@ The fail-closed startup matrix is:
 - `/health` and `/ready` stay minimal, while authenticated operations status carries detailed
   degradation counters.
 
-The SDK defaults to `redirect: "error"`, a 10-second total deadline, bounded response bytes,
-at most one safe retry, and a clamped `Retry-After`. It rejects credentials in the URL and
-plain HTTP outside loopback. Mutations are retried only with an idempotency key; caller abort
-and the client deadline are combined.
+The SDK now defaults to `redirect: "error"`, a 10-second total deadline, and a 1 MiB response
+limit. It rejects credentials in the URL and plain HTTP outside loopback and currently does
+not retry implicitly. Hosted model transports use bounded retries and clamped `Retry-After`
+under one deadline. Future V2 mutations may be retried only with an idempotency key.
 
 ### Atomic command API
 
@@ -270,7 +280,10 @@ path.
 The read path filters to current accepted heads before lexical/vector retrieval. An explicit
 revision wins within a series; late historical evidence does not silently replace the head;
 unresolved contradictory series return `conflict`; similarity alone cannot rewrite state.
-An optional `asOf` query evaluates head events and effective time.
+Bitemporal reads expose distinct `recordedAsOf` and `effectiveAsOf` parameters. Recorded time
+selects the head-event history known to the system at that instant; effective time then
+filters validity within that recorded snapshot. Revision order is authoritative for the
+head, so a late observation with an older effective time cannot silently advance it.
 
 V2 context returns a decision independent from retrieval rank:
 
@@ -307,9 +320,11 @@ compatibility; free-standing prose is not authoritative.
 
 **P0-A — immediate security/correctness**
 
-- fail-closed startup, explicit Postgres URL, SDK redirect/deadline/size/retry bounds;
-- extraction failures quarantined, quickstart fixed, MCP verification in CI;
-- provider id access scoped in new code, clean benchmark manifests required.
+- **Implemented:** fail-closed startup/production matrix; SDK redirect, HTTPS, deadline and
+  body bounds; hosted retry/`Retry-After` bounds; extraction failure/no-facts prompt
+  quarantine; quickstart and MCP CI verification.
+- **Still open:** provider id access scoped in the new store contract and clean benchmark
+  manifests required by release automation.
 
 **P0-B — transactional mutation core**
 
@@ -323,6 +338,9 @@ compatibility; free-standing prose is not authoritative.
 - route V1 writes through V2 commands;
 - backfill each legacy record as one series/version with synthetic `legacy_import` evidence,
   explicitly marking original evidence unavailable rather than inventing it;
+- deterministically group legacy collisions before enabling the active-content uniqueness
+  constraint: preserve every row as evidence, select a head by explicit status then
+  `lastSeenAt`, `createdAt`, and stable id, and emit an auditable reconciliation decision;
 - preserve the legacy id as `seriesId`, add `versionId`, shadow-read and compare visibility/
   ranking/context, then switch reads and stop legacy writes.
 

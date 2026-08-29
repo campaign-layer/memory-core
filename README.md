@@ -60,7 +60,7 @@ before publishing; the outputs are copied from that session, not written by hand
 git clone https://github.com/campaign-layer/memory-core
 cd memory-core
 npm ci
-HOST=127.0.0.1 npm run dev   # development-only, loopback:7401
+npm run dev   # development-only; defaults to 127.0.0.1:7401
 ```
 
 This minimal walkthrough has no API key and is safe only on loopback. For persistent storage
@@ -455,7 +455,9 @@ unrelated keys, so unknown names cannot be rejected; validate the deployment man
 | var | default | meaning |
 |---|---|---|
 | `PORT` | `7401` | HTTP port. 1–65535 or startup throws. |
-| `HOST` | `0.0.0.0` | bind address |
+| `HOST` | `127.0.0.1` | bind address; an unauthenticated non-loopback bind fails closed |
+| `MEMORY_ENV` | `development` | `development` \| `test` \| `production`; production enforces credentials, Postgres, an explicit database URL, and external migrations |
+| `MEMORY_ALLOW_INSECURE_LISTEN` | `false` | development-only escape hatch for an unauthenticated non-loopback bind; forbidden in production |
 | `MEMORY_PROVIDER` | `in-memory` | `in-memory` \| `file` \| `enhanced` \| `dual-layer` \| `postgres` |
 | `MEMORY_FILE_PATH` | `./data/memory-core.json` | `file` provider path |
 | `MEMORY_CORE_API_KEYS` | unset | comma-separated **global operator** keys; each can access every tenant and run compaction |
@@ -636,11 +638,13 @@ Deployment guidance, docker-compose, Kubernetes and the operational limits:
   `VOYAGE_API_KEY`; the benchmark refuses to label a fallback run as reranked. Run the
   credentialed context command in `bench/README.md` and tune its score gate on a separate
   development split.
-- **Authentication is opt-in.** Put normal agent keys in `MEMORY_CORE_PRINCIPAL_API_KEYS`.
+- **Authentication is optional only on loopback by default.** Put normal agent keys in `MEMORY_CORE_PRINCIPAL_API_KEYS`.
   `MEMORY_CORE_TENANT_API_KEYS` is a privileged tenant-admin/identity-assertor surface and
   `MEMORY_CORE_API_KEYS` is global operator access. If all three are empty, HTTP
-  authentication is disabled. Principal grants bind tenant, effective space, app, and actor;
-  a thread remains caller-selected within that bound actor.
+  authentication is disabled, but startup rejects a non-loopback bind unless the explicit
+  development-only insecure-listen override is set. `MEMORY_ENV=production` always requires
+  credentials. Principal grants bind tenant, effective space, app, and actor; a thread remains
+  caller-selected within that bound actor.
 - **The rate limiter is per-process**, so a fleet-wide quota multiplies by replica count.
   Reverse-proxy addresses are trusted only when `MEMORY_TRUST_PROXY_HOPS` is set correctly.
 

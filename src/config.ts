@@ -26,6 +26,8 @@ type RerankerKindsAreExhaustive = AssertNever<Exclude<RerankerKind, (typeof RERA
 const envSchema = z.object({
   PORT: z.string().optional(),
   HOST: z.string().optional(),
+  MEMORY_ENV: z.enum(["development", "test", "production"]).optional(),
+  MEMORY_ALLOW_INSECURE_LISTEN: z.enum(["true", "false"]).optional(),
   MEMORY_PROVIDER: z.enum(PROVIDER_KINDS).optional(),
   MEMORY_FILE_PATH: z.string().optional(),
   MEMORY_CORE_API_KEYS: z.string().optional(),
@@ -53,6 +55,9 @@ const envSchema = z.object({
 export interface MemoryCoreConfig {
   port: number;
   host: string;
+  environment: "development" | "test" | "production";
+  /** Development-only escape hatch for an unauthenticated non-loopback listener. */
+  allowInsecureListen: boolean;
   providerKind: MemoryProviderKind;
   filePath: string;
   /** Global operator credentials. These can access every tenant and run compaction. */
@@ -80,6 +85,22 @@ function parsePort(raw: string | undefined): number {
     throw new Error(`Invalid PORT value: ${raw}`);
   }
   return value;
+}
+
+function parseHost(raw: string | undefined): string {
+  const host = raw ?? "127.0.0.1";
+  if (!host || host !== host.trim()) {
+    throw new Error("Invalid HOST value: expected a non-empty host without surrounding whitespace");
+  }
+  return host;
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  return normalized === "localhost"
+    || normalized === "::1"
+    || normalized === "[::1]"
+    || /^127(?:\.\d{1,3}){3}$/.test(normalized);
 }
 
 function parseRateLimit(raw: string | undefined): number {
@@ -290,18 +311,51 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): MemoryCoreConf
   const tenantApiKeys = parseTenantApiKeys(parsed.MEMORY_CORE_TENANT_API_KEYS);
   const principalApiKeys = parsePrincipalApiKeys(parsed.MEMORY_CORE_PRINCIPAL_API_KEYS);
   assertCredentialSeparation(apiKeys, tenantApiKeys, principalApiKeys);
+  const host = parseHost(parsed.HOST);
+  const environment = parsed.MEMORY_ENV ?? "development";
+  const allowInsecureListen = parsed.MEMORY_ALLOW_INSECURE_LISTEN === "true";
+  const providerKind = parsed.MEMORY_PROVIDER || "in-memory";
+  const postgresUrl = parsed.MEMORY_PG_URL || parsed.DATABASE_URL;
+  const postgresAutoMigrate = parsed.MEMORY_PG_AUTO_MIGRATE === "true";
+  const hasCredentials = apiKeys.size > 0 || tenantApiKeys.size > 0 || principalApiKeys.length > 0;
+
+  if (!hasCredentials && !isLoopbackHost(host) && !allowInsecureListen) {
+    throw new Error(
+      "Refusing an unauthenticated non-loopback listener; configure credentials or set MEMORY_ALLOW_INSECURE_LISTEN=true for development only",
+    );
+  }
+  if (environment === "production") {
+    if (allowInsecureListen) {
+      throw new Error("MEMORY_ALLOW_INSECURE_LISTEN is forbidden when MEMORY_ENV=production");
+    }
+    if (!hasCredentials) {
+      throw new Error("MEMORY_ENV=production requires at least one memory-core credential");
+    }
+    if (providerKind !== "postgres") {
+      throw new Error("MEMORY_ENV=production requires MEMORY_PROVIDER=postgres");
+    }
+    if (!postgresUrl) {
+      throw new Error("MEMORY_ENV=production requires an explicit MEMORY_PG_URL or DATABASE_URL");
+    }
+    if (postgresAutoMigrate) {
+      throw new Error("MEMORY_ENV=production forbids application auto-migration; run migrations separately");
+    }
+  }
+
   return {
     port: parsePort(parsed.PORT),
-    host: parsed.HOST || "0.0.0.0",
-    providerKind: parsed.MEMORY_PROVIDER || "in-memory",
+    host,
+    environment,
+    allowInsecureListen,
+    providerKind,
     filePath: parsed.MEMORY_FILE_PATH || path.join(process.cwd(), "data", "memory-core.json"),
     apiKeys,
     tenantApiKeys,
     principalApiKeys,
     rateLimitPerMin: parseRateLimit(parsed.MEMORY_RATE_LIMIT_PER_MIN),
     trustProxyHops: parseTrustProxyHops(parsed.MEMORY_TRUST_PROXY_HOPS),
-    postgresUrl: parsed.MEMORY_PG_URL || parsed.DATABASE_URL,
-    postgresAutoMigrate: parsed.MEMORY_PG_AUTO_MIGRATE === "true",
+    postgresUrl,
+    postgresAutoMigrate,
     embeddingModel: parsed.MEMORY_EMBEDDING_MODEL,
     embedder: parseEmbedderSpec(env),
     reranker: parseRerankerSpec(env),

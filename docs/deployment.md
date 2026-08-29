@@ -26,11 +26,13 @@ Not a certification — a gap list, re-checked against the code.
 
 ### Auth
 
-- **Authentication is optional configuration.** Normal agent credentials belong in
+- **Authentication is optional only for the default loopback listener.** Normal agent credentials belong in
   `MEMORY_CORE_PRINCIPAL_API_KEYS`, which binds tenant, effective space, app, and actor.
   `MEMORY_CORE_TENANT_API_KEYS` is privileged tenant-admin/identity-assertor access, and
   every `MEMORY_CORE_API_KEYS` value is a global operator. Leaving all three empty disables
-  authentication entirely. A principal can still select a thread within its bound actor.
+  authentication, but a non-loopback listener then fails startup unless the explicit
+  development-only override is set. `MEMORY_ENV=production` always requires credentials.
+  A principal can still select a thread within its bound actor.
 - One per-key limit applies when auth is enabled, but there are no differentiated quotas,
   rotation, expiry, or audit log of memory reads and writes.
 - Configured credentials are pre-hashed and looked up as fixed-width SHA-256 digests; there
@@ -135,16 +137,21 @@ The exact Claude, Codex, and Hermes configurations are in
 
 ### Current security boundary
 
-The current binary defaults to `HOST=0.0.0.0` and disables HTTP authentication when all key
-settings are empty. Until the fail-closed startup contract in
-[`ARCHITECTURE.md`](./ARCHITECTURE.md#reviewed-production-target-2026-08-29) is implemented:
+The configured binary now defaults to `HOST=127.0.0.1`. With no credentials it refuses a
+non-loopback listener unless `MEMORY_ALLOW_INSECURE_LISTEN=true` is explicitly set in
+development; that override emits a warning and is rejected when `MEMORY_ENV=production`.
+Production mode additionally requires Postgres, an explicit database URL, credentials, and
+application auto-migration disabled.
 
-- bind local installs explicitly to `127.0.0.1`;
-- configure principal keys even on a laptop;
-- never publish port 7401 directly to an untrusted network;
-- terminate TLS and enforce network policy at a trusted proxy for non-loopback access;
-- use a fixed, non-redirecting `MEMORY_CORE_URL`, because the current SDK does not yet reject
-  redirects or impose a whole-request deadline.
+The TypeScript client rejects redirects and credentials embedded in the base URL, requires
+HTTPS outside loopback, and enforces one deadline across the response body plus a 1 MiB
+default body limit. Hosted embedder, reranker, and extractor requests apply the same
+non-redirecting, bounded-body contract; their retries and clamped `Retry-After` sleeps share
+one operation deadline.
+
+Still terminate TLS and enforce network policy at a trusted proxy for any non-loopback
+deployment. This startup contract prevents the easiest accidental exposure; it does not add
+TLS, distributed rate limits, audit logs, or the remaining production gates above.
 
 This is a safe local operating recipe, not a production-readiness claim.
 
@@ -170,7 +177,9 @@ and use `/ready` to confirm the selected provider kind.
 | Variable | Default | Notes |
 |---|---|---|
 | `PORT` | `7401` | Must be 1–65535 or startup throws. |
-| `HOST` | `0.0.0.0` | |
+| `HOST` | `127.0.0.1` | An unauthenticated non-loopback bind fails closed. |
+| `MEMORY_ENV` | `development` | `development` \| `test` \| `production`. Production requires credentials, Postgres, an explicit database URL, and external migrations. This is intentionally independent of `NODE_ENV`. |
+| `MEMORY_ALLOW_INSECURE_LISTEN` | `false` | Exactly `"true"` permits an unauthenticated non-loopback listener only outside production and emits a warning. |
 | `MEMORY_PROVIDER` | `in-memory` | `in-memory` \| `file` \| `enhanced` \| `dual-layer` \| `postgres`. Anything else fails zod at startup. |
 | `MEMORY_FILE_PATH` | `./data/memory-core.json` | `file` provider only. |
 | `MEMORY_CORE_API_KEYS` | unset | Comma-separated **global operator** keys. Each can access every tenant and run compaction. |
@@ -222,7 +231,10 @@ measured with.
 
 ```bash
 docker build -t memory-core .
-docker run -p 127.0.0.1:7401:7401 memory-core
+docker run -p 127.0.0.1:7401:7401 \
+  -e HOST=0.0.0.0 \
+  -e MEMORY_CORE_API_KEYS=replace-operator-key \
+  memory-core
 
 # Optional local ONNX image. Do not release while its dependency audit is red.
 docker build \
@@ -231,6 +243,8 @@ docker build \
 
 # file persistence (the image pre-creates /app/data owned by the node user)
 docker run -p 127.0.0.1:7401:7401 \
+  -e HOST=0.0.0.0 \
+  -e MEMORY_CORE_API_KEYS=replace-operator-key \
   -e MEMORY_PROVIDER=file \
   -e MEMORY_FILE_PATH=/app/data/memory-core.json \
   -v "$(pwd)/data:/app/data" \
@@ -238,6 +252,8 @@ docker run -p 127.0.0.1:7401:7401 \
 
 # postgres
 docker run -p 127.0.0.1:7401:7401 \
+  -e HOST=0.0.0.0 \
+  -e MEMORY_CORE_API_KEYS=replace-operator-key \
   -e MEMORY_PROVIDER=postgres \
   -e MEMORY_PG_URL='postgres://user:pw@host:5432/memory_core' \
   -e MEMORY_PG_AUTO_MIGRATE=true \
@@ -284,6 +300,7 @@ services:
     build: .
     ports: ["127.0.0.1:7401:7401"]
     environment:
+      HOST: 0.0.0.0
       MEMORY_PROVIDER: postgres
       MEMORY_PG_URL: postgres://memory:memory@db:5432/memory_core
       MEMORY_PG_AUTO_MIGRATE: "true"
@@ -336,6 +353,8 @@ spec:
         image: memory-core:latest
         ports: [{ containerPort: 7401 }]
         env:
+        - { name: HOST, value: "0.0.0.0" }
+        - { name: MEMORY_ENV, value: "production" }
         - { name: MEMORY_PROVIDER, value: "postgres" }
         - name: MEMORY_PG_URL
           valueFrom: { secretKeyRef: { name: memory-core-secrets, key: pg-url } }
