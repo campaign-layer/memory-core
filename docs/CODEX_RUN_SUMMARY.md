@@ -338,6 +338,9 @@ the executable quickstart and adds the existing MCP lifecycle verifier to CI.
   `git diff --check` passed.
 - Codex stdio syntax was checked against the installed Codex CLI and official OpenAI MCP
   documentation. Claude and Hermes shapes were checked against their official documentation.
+- GitHub CI run `33248998776` passed every job: Node 20/22, the new MCP lifecycle gate,
+  benchmark/context determinism, Postgres + pgvector, Hermes schemas/contracts, and the
+  production container readiness smoke.
 
 ### Risks / Follow-ups
 
@@ -350,5 +353,5 @@ the executable quickstart and adds the existing MCP lifecycle verifier to CI.
   remain open in code.
 - Generic MCP protocol behavior is locally verified, but this pass did not run a real Claude,
   Codex, or Hermes host through the full shared-service scenario.
-- GitHub CI, Postgres migration/load, multi-replica chaos, backup/restore, distributed quota,
+- Representative migration/load, multi-replica chaos, backup/restore, distributed quota,
   audit export, and held-out abstention/temporal targets remain release gates.
