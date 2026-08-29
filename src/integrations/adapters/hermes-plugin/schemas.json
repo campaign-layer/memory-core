@@ -33,7 +33,7 @@
           "default": 0.5
         },
         "scope": {
-          "description": "actor=remember across all sessions (default), thread=this conversation only, workspace=shared with the team.",
+          "description": "actor=remember across apps and sessions (default), thread=this conversation only, workspace=shared with every actor in this memory space.",
           "type": "string",
           "enum": [
             "thread",
@@ -95,7 +95,7 @@
   },
   {
     "name": "build_context",
-    "description": "Return one token-budgeted memory block, ready to paste into your system prompt before you generate. Prefer this over recall at the start of a turn: it merges the actor's profile with the memories most relevant to the request and trims to a character budget. Use recall instead when you need individual ids and scores to act on.",
+    "description": "Return one character-budgeted memory block, ready to paste into your system prompt before you generate. Prefer this over recall at the start of a turn: it merges the actor's profile with the memories most relevant to the request and trims to a character budget. Use recall instead when you need individual ids and scores to act on.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -106,14 +106,14 @@
           "maxLength": 500
         },
         "maxItems": {
-          "description": "Max memories in the block.",
+          "description": "Max query-relevant memories.",
           "type": "integer",
           "minimum": 1,
           "maximum": 30,
           "default": 8
         },
         "maxChars": {
-          "description": "Hard character budget.",
+          "description": "Hard whole-block character budget.",
           "type": "integer",
           "minimum": 300,
           "maximum": 20000,
@@ -151,7 +151,7 @@
   },
   {
     "name": "supersede",
-    "description": "Replace an outdated memory with its current value in one step: the old memory stops being recalled and the new text is stored in its place, keeping the original type and scope. Use when a fact changed rather than was never true - moved city, switched framework, new title, revised deadline. Needs the old memory id from recall.",
+    "description": "Replace an outdated memory with its current value using a guarded multi-step flow: the replacement is stored, then the old memory is retired. A partial result is reported if retirement races or fails. Use when a fact changed rather than was never true - moved city, switched framework, new title, revised deadline. Needs the old memory id from recall.",
     "parameters": {
       "type": "object",
       "properties": {

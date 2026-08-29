@@ -14,11 +14,11 @@ Not a certification — a gap list, re-checked against the code.
 
 ### Horizontal scaling
 
-- **The rate limiter is per-process.** Three replicas means 3x the configured limit. It is
-  decorative behind a load balancer.
-- **`trust proxy` is not enabled.** Behind any reverse proxy `req.ip` is the proxy's address,
-  so every unauthenticated client shares one bucket and the limiter blocks everyone or no one.
-  Enabling it needs a code change in `src/http.ts`.
+- **The rate limiter is per-process.** Three replicas means 3x the configured limit; use an
+  upstream or distributed limiter when the quota must be fleet-wide.
+- **Proxy headers are distrusted by default.** Behind a reverse proxy, set
+  `MEMORY_TRUST_PROXY_HOPS` to the exact hop count or unauthenticated clients share the
+  proxy's IP bucket. Setting it too high lets callers spoof their source address.
 - **No idempotency keys on ingest.** A retried `POST /v1/memory/ingest` relies on exact-text
   dedupe, which fails the moment the text differs by one character.
 - **Only `postgres` can back more than one replica.** `in-memory`, `file`, `enhanced` and
@@ -26,12 +26,20 @@ Not a certification — a gap list, re-checked against the code.
 
 ### Auth
 
-- **API keys are not scoped to a tenant.** Any valid key reads and writes **every** tenant.
-  Multi-tenancy is enforced against accidents, not against a hostile caller holding a key.
-- No per-key rate limits, no rotation, no expiry, no audit log of memory reads or writes.
-- Keys are compared with `Set.has()` — not constant-time.
-- No CORS policy and no security headers. Do not expose this directly to a browser.
-- The only request-size control is `express.json({ limit: "2mb" })`.
+- **Authentication is optional configuration.** Normal agent credentials belong in
+  `MEMORY_CORE_PRINCIPAL_API_KEYS`, which binds tenant, effective space, app, and actor.
+  `MEMORY_CORE_TENANT_API_KEYS` is privileged tenant-admin/identity-assertor access, and
+  every `MEMORY_CORE_API_KEYS` value is a global operator. Leaving all three empty disables
+  authentication entirely. A principal can still select a thread within its bound actor.
+- One per-key limit applies when auth is enabled, but there are no differentiated quotas,
+  rotation, expiry, or audit log of memory reads and writes.
+- Configured credentials are pre-hashed and looked up as fixed-width SHA-256 digests; there
+  is no external secret manager or online rotation mechanism.
+- Responses set `nosniff`, `DENY` frame, no-referrer, and no-store headers. There is still no
+  CORS policy, CSP, or TLS termination; do not expose the service directly to a browser.
+- JSON is parsed only after coarse IP limiting, authentication, and per-key limiting.
+  Ingest is capped at 200 observations; text, summaries, identifiers, and metadata have
+  independent schema bounds in addition to the 2 MiB body limit.
 
 ### Observability
 
@@ -46,15 +54,23 @@ Not a certification — a gap list, re-checked against the code.
 Measured, not asserted — see [`BENCHMARKS.md`](./BENCHMARKS.md). The short version: mem0 beats
 us on LoCoMo R@1/R@5/MRR/nDCG and on QA accuracy, a plain BM25 baseline beats us on
 LongMemEval R@1, no system anywhere handles knowledge updates, the `postgres` provider has no
-measured retrieval number at all, and `buildContext` — the endpoint agents actually call — is
-unmeasured.
+measured retrieval number at all, and the internal `buildContext` regression exposes weak
+top-1 ordering, stale-over-current failures, and total abstention leakage. That context suite
+is repository-authored and is not a public benchmark or a SOTA comparison.
 
 ### Reliability
 
-- No dead-letter queue for failed ingest or update, no backpressure, no circuit breakers.
+- No dead-letter queue for failed ingest or update and no backpressure. Hosted embedder and
+  reranker calls have local fail-open cooldowns, but there is no distributed coordination.
+  Reranker counters/cooldown and Postgres vector-failure counts are available from the
+  in-process health object, but the unauthenticated `/ready` route deliberately exposes only
+  provider kind and boolean status. There is no authenticated fleet metrics surface yet.
 - `service.ingest` loops observations sequentially; batch ingest is serial.
 - `FileProvider.persist()` re-serializes every record on every write.
 - `dual-layer`'s consolidation is O(n²) per actor on a 30 s timer, unbounded.
+- SIGINT/SIGTERM stops accepting work and closes provider resources. A stuck HTTP drain is
+  force-closed after 10 seconds; provider close receives a further five-second bound, and a
+  forced or failed close exits non-zero for the orchestrator to record.
 
 ## Local
 
@@ -75,9 +91,9 @@ npm start              # node dist/server.js
 
 ## Configuration
 
-Every environment variable the service reads, from `src/config.ts`. Unknown keys are stripped
-by zod, so a typo is silently ignored — check `/ready` to confirm which provider actually
-started.
+Every environment variable the service reads, from `src/config.ts`. Process environments
+contain unrelated keys, so unknown names cannot be rejected; validate the deployment manifest
+and use `/ready` to confirm the selected provider kind.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -85,32 +101,46 @@ started.
 | `HOST` | `0.0.0.0` | |
 | `MEMORY_PROVIDER` | `in-memory` | `in-memory` \| `file` \| `enhanced` \| `dual-layer` \| `postgres`. Anything else fails zod at startup. |
 | `MEMORY_FILE_PATH` | `./data/memory-core.json` | `file` provider only. |
-| `MEMORY_CORE_API_KEYS` | unset | Comma-separated. When set, `/v1/*` requires `x-api-key` or `Authorization: Bearer`. Empty means **no auth**. |
+| `MEMORY_CORE_API_KEYS` | unset | Comma-separated **global operator** keys. Each can access every tenant and run compaction. |
+| `MEMORY_CORE_TENANT_API_KEYS` | unset | JSON object from tenant id to privileged tenant-admin/identity-assertor keys. These may act as any actor in the tenant. |
+| `MEMORY_CORE_PRINCIPAL_API_KEYS` | unset | Normal-agent grants: `[{"key":"agent-key","tenantId":"acme","spaceId":"team","appId":"planner","actorId":"alice"}]`; `spaceId` defaults to `actorId`. |
 | `MEMORY_RATE_LIMIT_PER_MIN` | `120` | Must be 10–10000 or startup throws. Per identity, **per process**. |
+| `MEMORY_TRUST_PROXY_HOPS` | unset | Trusted reverse-proxy hop count. Integer 1–10; unset trusts no forwarded address. |
 | `MEMORY_PG_URL` | dev localhost URL | Postgres connection string. |
 | `DATABASE_URL` | — | Fallback if `MEMORY_PG_URL` is unset. |
-| `MEMORY_PG_AUTO_MIGRATE` | `false` | Exactly the string `"true"` enables it. |
+| `MEMORY_PG_AUTO_MIGRATE` | `false` | Exactly `"true"` verifies/applies checksummed migrations before the production listener opens. |
 | `MEMORY_EMBEDDER` | `none` | `none` \| `local` \| `hash` \| `voyage` \| `openai`. `none` means BM25-only retrieval. |
 | `MEMORY_EMBEDDING_MODEL` | unset | Model id override, and the label stored beside vectors. |
 | `MEMORY_EMBEDDING_DIMS` | unset | Dimension override. Integer 1–16000 or startup throws. |
+| `MEMORY_RERANKER` | `none` | `none` \| `voyage`. Applies a service-level cross-encoder after provider recall. |
+| `MEMORY_RERANKER_MODEL` | `rerank-2.5` | Voyage model override. |
+| `MEMORY_RERANKER_MIN_SCORE` | `0` | Final cross-encoder score gate in 0–1. Calibrate before raising. |
 | `MEMORY_EXTRACTOR` | `none` | `none` (passthrough) \| `llm`. `none` keeps the write path byte-identical to pre-extraction behaviour. |
 | `MEMORY_EXTRACTOR_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible chat endpoint. |
 | `MEMORY_EXTRACTOR_API_KEY` | unset | Key for the above. |
 | `MEMORY_EXTRACTOR_MODEL` | `gpt-4o-mini` | Extraction model. |
 | `MEMORY_EXTRACTOR_BATCH_SIZE` | unset | Turns per extraction call. Integer 1–200 or startup throws. |
 
-The MCP server reads a separate set (`MEMORY_TENANT_ID`, `MEMORY_APP_ID`, `MEMORY_ACTOR_ID`,
-`MEMORY_CORE_URL`, `MEMORY_CORE_API_KEY`, `MEMORY_CORE_MODE`, `MEMORY_THREAD_ID`,
+The MCP server reads a separate set (`MEMORY_TENANT_ID`, `MEMORY_SPACE_ID`, `MEMORY_APP_ID`,
+`MEMORY_ACTOR_ID`, `MEMORY_CORE_URL`, `MEMORY_CORE_API_KEY`, `MEMORY_CORE_MODE`, `MEMORY_THREAD_ID`,
 `MEMORY_SOURCE_TYPE`) — see [`src/integrations/README.md`](../src/integrations/README.md).
 
-`VOYAGE_API_KEY` and `OPENAI_API_KEY` are read by the corresponding embedder classes when
-`MEMORY_EMBEDDER` selects them.
+`VOYAGE_API_KEY` is read when either the Voyage embedder or reranker is selected;
+`OPENAI_API_KEY` is read by the OpenAI embedder.
+
+The reranker is optional and fail-open: it pulls 50–100 provider candidates, returns the
+requested top-k, and gates on `MEMORY_RERANKER_MIN_SCORE`. Each call is capped at five seconds
+with no inline retry. A failure logs once, disables the hosted stage for 60 seconds, and
+reuses the already-fetched provider ranking without a second provider request. In-process
+`MemoryCoreService.getHealth()` exposes configured id, requests, attempts, successes,
+failures, fallbacks, and cooldown; unauthenticated `/ready` does not.
 
 **Turning on `MEMORY_EMBEDDER` changes cost, not just quality.** On the synthetic corpus
 (527 records, one machine) `local` took ingest from 6 ms to 3.7 s and search from 0.11 ms to
 6.2 ms mean. `local` downloads a ~35 MB ONNX model on first use and is offline thereafter;
-`voyage` and `openai` add a network call per batch. Confirm what started with `/ready` — the
-`detail` string names the resolved embedder and its dimension.
+`voyage` and `openai` add a network call per batch. `/ready` confirms the provider kind only;
+record the resolved embedder and dimension from deployment configuration or the in-process
+health object.
 
 **`MEMORY_EXTRACTOR=llm` costs one model call per batch of turns** and has no measured
 quality number. The default `none` is what every published benchmark for this project was
@@ -121,6 +151,11 @@ measured with.
 ```bash
 docker build -t memory-core .
 docker run -p 7401:7401 memory-core
+
+# Optional local ONNX image. Do not release while its dependency audit is red.
+docker build \
+  --build-arg MEMORY_CORE_INCLUDE_LOCAL_ONNX=true \
+  -t memory-core-local-onnx .
 
 # file persistence (the image pre-creates /app/data owned by the node user)
 docker run -p 7401:7401 \
@@ -139,10 +174,13 @@ docker run -p 7401:7401 \
 
 The `Dockerfile` is three stages:
 
-1. **build** — `npm ci` with devDependencies, then `npm run build`. tsc is a devDependency, so
-   this stage must have them.
-2. **prod-deps** — `npm ci --omit=dev` in a clean stage, so no `typescript`, `tsx` or
-   `@types/express` reaches the runtime image.
+1. **build** — `npm ci --omit=optional` with devDependencies, then `npm run build`. tsc is a
+   devDependency, while the local ONNX import is deliberately dynamic and is not needed to
+   compile.
+2. **prod-deps** — `npm ci --omit=dev --omit=optional` in a clean stage, so no `typescript`,
+   `tsx`, `@types/express`, or native ONNX stack reaches the default runtime image. Set build
+   argument `MEMORY_CORE_INCLUDE_LOCAL_ONNX=true` only for an explicitly audited local-ONNX
+   image.
 3. **runtime** — `node:22-bookworm-slim` holding only `dist/`, production `node_modules`,
    `package.json` and `migrations/`. Unprivileged `node` user, `/app/data` pre-created and
    chowned, a `HEALTHCHECK` using node's global `fetch` (no curl in the image), and an
@@ -151,15 +189,20 @@ The `Dockerfile` is three stages:
 
 Two things that are load-bearing:
 
-- **`migrations/` must ship.** `PostgresMemoryProvider` resolves the migration file relative to
-  its own compiled location (`dist/providers/../../migrations/001_init.sql`). Drop the COPY and
-  `MEMORY_PG_AUTO_MIGRATE=true` fails at runtime.
-- **The base is Debian, not Alpine.** `@huggingface/transformers` is a runtime dependency and
-  pulls in `onnxruntime-node` and `sharp`, whose prebuilt binaries are glibc-linked. On
-  musl they install and then fail at require time.
+- **`migrations/` must ship.** `PostgresMemoryProvider` resolves every pending versioned SQL
+  file relative to its compiled location. Drop the COPY and `MEMORY_PG_AUTO_MIGRATE=true`
+  fails at runtime.
+- **The default image intentionally omits optional dependencies.** It supports BM25 plus
+  Voyage/OpenAI embedders, but `MEMORY_EMBEDDER=local` needs the opt-in build argument. The
+  optional native dependency tree currently has unresolved high-severity advisories and is
+  not release-gated.
+- **The base is Debian, not Alpine.** The opt-in ONNX stack pulls native `onnxruntime-node`
+  and `sharp` binaries that target glibc.
 
 The previous Dockerfile could not build at all: it ran `npm ci --only=production` and then
 `npm run build`, with `typescript`, `@types/node` and `@types/express` in devDependencies.
+CI now builds the default image without optional ONNX packages and boots that image against
+`pgvector/pgvector:pg16`, asserting that `/ready` names the Postgres provider.
 
 ### docker-compose
 
@@ -172,6 +215,8 @@ services:
       MEMORY_PROVIDER: postgres
       MEMORY_PG_URL: postgres://memory:memory@db:5432/memory_core
       MEMORY_PG_AUTO_MIGRATE: "true"
+      MEMORY_CORE_PRINCIPAL_API_KEYS: ${MEMORY_CORE_PRINCIPAL_API_KEYS}
+      MEMORY_CORE_TENANT_API_KEYS: ${MEMORY_CORE_TENANT_API_KEYS}
       MEMORY_CORE_API_KEYS: ${MEMORY_CORE_API_KEYS}
     depends_on:
       db: { condition: service_healthy }
@@ -224,6 +269,10 @@ spec:
           valueFrom: { secretKeyRef: { name: memory-core-secrets, key: pg-url } }
         - name: MEMORY_CORE_API_KEYS
           valueFrom: { secretKeyRef: { name: memory-core-secrets, key: api-keys } }
+        - name: MEMORY_CORE_TENANT_API_KEYS
+          valueFrom: { secretKeyRef: { name: memory-core-secrets, key: tenant-api-keys } }
+        - name: MEMORY_CORE_PRINCIPAL_API_KEYS
+          valueFrom: { secretKeyRef: { name: memory-core-secrets, key: principal-api-keys } }
         resources:
           requests: { memory: "256Mi", cpu: "100m" }
           limits:   { memory: "1Gi",   cpu: "1000m" }
@@ -244,18 +293,24 @@ Use `/ready` for readiness and `/health` for liveness — that distinction matte
 Run the migration as a `Job` rather than relying on `MEMORY_PG_AUTO_MIGRATE` with three
 replicas racing each other. It is idempotent, but a single ordered application is cleaner.
 
-`terminationGracePeriodSeconds` defaults to 30 s, which is comfortably more than the shutdown
-path needs (stop listening, then close the pg pool).
+The memory-space upgrade backfills legacy rows into each record owner's personal space. This
+is intentionally privacy-preserving but narrows old `app`/`workspace` sharing. Before rollout,
+back up the database and explicitly update `space_id` for legacy records that should remain in
+a shared team space. The migration does not guess that policy.
+
+`terminationGracePeriodSeconds` defaults to 30 s, which exceeds memory-core's 10-second HTTP
+drain plus five-second provider-close bound.
 
 ## Behind a proxy
 
-- **Enable `trust proxy` first.** It is not set, so `req.ip` is the proxy's address and every
-  unauthenticated caller shares one rate-limit bucket. This needs a code change in
-  `src/http.ts`.
+- Set `MEMORY_TRUST_PROXY_HOPS` to the exact number of trusted hops between the client and
+  memory-core. Leave it unset for direct connections. Do not use an arbitrarily high value:
+  Express would then trust a caller-controlled forwarded address.
 - The per-process limiter multiplies by replica count. With three replicas and
   `MEMORY_RATE_LIMIT_PER_MIN=120`, the real ceiling is 360/min.
 - Terminate TLS at the proxy; the service speaks plain HTTP only.
-- There is no CORS policy and no security headers. Do not expose this directly to a browser.
+- Baseline hardening headers are emitted, but there is no CORS policy, CSP, or TLS. Keep the
+  service on an internal network behind the proxy.
 
 ## Health and observability
 
@@ -265,7 +320,7 @@ curl -s localhost:7401/health
 
 curl -s localhost:7401/ready
 # {"ok":true,"service":"memory-core",
-#  "provider":{"ok":true,"provider":"in-memory","detail":"records=0, indexed=0"},
+#  "provider":{"ok":true,"provider":"in-memory"},
 #  "timestamp":"..."}
 ```
 
@@ -276,20 +331,31 @@ no structured logging — the HTTP layer writes one line per request to `console
 [memory-core] <request-id> POST /v1/memory/context 200 3ms
 ```
 
-`x-request-id` is echoed from the caller when present, so it correlates with an upstream trace
-id. Collect stdout; there is no log file and no log-level control.
+Safe `x-request-id` values (`[A-Za-z0-9._:-]`, at most 128 characters) are echoed, so they can
+correlate with an upstream trace id; other values are replaced. Access logs deliberately omit
+query strings because search queries can contain private memory. Collect stdout; there is no
+log file and no log-level control.
 
 ## Auth
 
 ```bash
-export MEMORY_CORE_API_KEYS=key1,key2,key3
-curl -H "x-api-key: key1"           localhost:7401/v1/memory/compact -X POST
-curl -H "Authorization: Bearer key1" localhost:7401/v1/memory/compact -X POST
+export MEMORY_CORE_PRINCIPAL_API_KEYS='[{"key":"acme-agent-key","tenantId":"acme","appId":"agent-app","actorId":"alice"}]'
+export MEMORY_CORE_API_KEYS=operator-key
+
+curl -H "x-api-key: acme-agent-key" \
+  'localhost:7401/v1/memory/search?q=launch&tenantId=acme&appId=agent-app&actorId=alice'
+curl -H "Authorization: Bearer operator-key" localhost:7401/v1/memory/compact -X POST
 ```
 
-Only `/v1/*` is gated. Keys are **not scoped to a tenant** — any valid key reaches every
-tenant — and comparison is not constant-time. There is no key rotation, expiry, per-key limit,
-or audit log.
+Only `/v1/*` requires authentication. Health and readiness bypass auth and both admission
+limiters so orchestrator probes cannot be starved. Configured keys are compared as
+fixed-width SHA-256 digests. Principal keys receive 403 before provider access when tenant,
+effective space, app, or actor differs; tenant-wide writes require a tenant-admin or global
+key. Tenant-admin keys may assert any actor in their tenant, including mixed application
+identities, so reserve them for trusted gateways. Compaction is store-wide and requires a
+global operator key. Startup rejects a credential shared across operator, tenant-admin, and
+principal grant classes. If all three key settings are empty, authentication is disabled.
+There is still no built-in rotation, expiry, distributed quota, or durable audit log.
 
 ## Backup
 
@@ -309,12 +375,13 @@ There is no export or import route.
 | `Invalid PORT value` / `Invalid MEMORY_RATE_LIMIT_PER_MIN value` | Out of range. Rate limit must be 10–10000. |
 | Env var seems ignored | zod strips unknown keys. Only the variables in the table above are read. |
 | `filePath is required when MEMORY_PROVIDER=file` | `MEMORY_FILE_PATH` unset and no default resolved. |
-| 401 on `/v1/*` | `MEMORY_CORE_API_KEYS` is set and the key does not match. |
+| 401 on `/v1/*` | Authentication is enabled and the presented key is missing or unknown. |
+| 403 on `/v1/*` | The key is valid but the requested principal exceeds its grant, or a non-operator attempted global compaction. |
 | 429 | Rate limit. Check `Retry-After`. Remember it is per process. |
 | `/ready` 503 | Provider `health()` failed — usually Postgres unreachable. |
 | `postgres-provider: pgvector is not installed` | `CREATE EXTENSION vector;` in the target database. |
 | `postgres-provider: … requires both tenantId and appId` | An unscoped query. Intentional. |
-| Vector search returns nothing on `postgres` | Expected via env config: no embedder is injected, so the provider is FTS-only. Construct `PostgresMemoryProvider` with an `embedder`. See [`providers.md`](./providers.md#postgres). |
+| Vector search is lexical-only on `postgres` | Check `/ready` and logs for pgvector/table/embedder degradation. Provision the configured dimension during deploy; request paths never run DDL. |
 | Container exits immediately | Check `docker logs`. A zod config error throws before the listener starts. |
 | Search returns nothing | `minScore` defaults differ per provider (0.05, 0.1, 0.2). Pass `minScore: 0`. |
-| `archivedSuperseded` always 0 | Correct. Nothing on the write path sets that status. |
+| `archivedSuperseded` stays 0 | Expected unless an explicit supersede flow marked records before compaction; there is no automatic Resolver. |

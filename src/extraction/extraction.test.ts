@@ -274,6 +274,41 @@ test("an extractor that throws outright still stores every raw observation", asy
   assert.equal(result.records[0].text, "I live in Berlin");
 });
 
+test("extraction windows never mix visibility scopes", async () => {
+  const windows: string[][] = [];
+  const extractor: Extractor = {
+    id: "scope-spy",
+    async extract(input) {
+      windows.push(input.turns.map((turn) => turn.text));
+      return input.turns.map((turn, index) => ({
+        text: turn.text,
+        memoryType: "fact",
+        sourceTurnIndexes: [index],
+        origin: "passthrough",
+      }));
+    },
+  };
+  const service = new MemoryCoreService(new InMemoryProvider(), { extractor });
+
+  await service.ingest({
+    observations: [
+      observation("Actor-private launch detail", {
+        scope: "actor",
+        spaceId: "launch-team",
+      }),
+      observation("Workspace-visible launch detail", {
+        scope: "workspace",
+        spaceId: "launch-team",
+      }),
+    ],
+  });
+
+  assert.deepEqual(windows, [
+    ["Actor-private launch detail"],
+    ["Workspace-visible launch detail"],
+  ]);
+});
+
 // --- 6. grounding --------------------------------------------------------------
 
 test("a fabricated fact is rejected while the grounded facts from the same response are kept", async () => {

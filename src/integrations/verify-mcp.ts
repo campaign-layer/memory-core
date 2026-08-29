@@ -104,11 +104,32 @@ async function verifyRemote(check: (label: string, ok: boolean) => void): Promis
   );
   check("remote recall round-tripped over HTTP", recalled.includes("nginx"));
 
+  const superseded = show(
+    "remote supersede",
+    await client.callTool({
+      name: "supersede",
+      arguments: {
+        memoryId: id,
+        newText: "Runs memory-core behind a Caddy reverse proxy",
+        reason: "proxy changed",
+      },
+    }),
+  );
+  const replacementId = /id=(\S+)/.exec(superseded)?.[1];
+  check("remote supersede returned a replacement id", Boolean(replacementId));
+
+  const afterSupersede = show(
+    "remote recall after supersede",
+    await client.callTool({ name: "recall", arguments: { query: "reverse proxy" } }),
+  );
+  check("remote supersede retired old memory", !afterSupersede.includes("nginx"));
+  check("remote supersede recalled replacement", afterSupersede.includes("Caddy"));
+
   const forgotten = show(
     "remote forget",
-    await client.callTool({ name: "forget", arguments: { memoryId: id, reason: "remote check" } }),
+    await client.callTool({ name: "forget", arguments: { memoryId: replacementId, reason: "remote check" } }),
   );
-  check("remote forget degrades honestly", forgotten.includes("not archived"));
+  check("remote forget archives through scoped status API", forgotten.includes("will not be recalled"));
 
   const missing = await client.callTool({
     name: "feedback",

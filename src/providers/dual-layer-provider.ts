@@ -4,18 +4,24 @@ import type {
   MemoryFeedbackInput,
   MemoryFilters,
   MemoryRecord,
+  MemoryRetirementStatus,
+  MemoryScope,
   MemorySearchHit,
   MemorySearchQuery,
 } from "../types.js";
-import { isExpired, normalizeKey, overlapScore, recencyScore, tokenize } from "../utils.js";
+import { isExpired, normalizeKey, overlapScore, recencyScore, tokenize, uid } from "../utils.js";
+import { accessSpaceId, memoryDedupeKey, memoryVisibleTo, memoryVisibleToIdScope, normalizeRecordSpace, recordSpaceId, requireMemoryAccess, sameMemoryOwner } from "../access.js";
 
 // Inspired by AWS Bedrock AgentCore Memory architecture
 interface ShortTermEvent {
   id: string;
   recordId: string;
   tenantId: string;
+  spaceId: string;
   appId: string;
   actorId: string;
+  scope: MemoryScope;
+  threadId: string | null;
   sessionId: string;
   timestamp: Date;
   type: 'conversational' | 'blob' | 'system';
@@ -28,8 +34,11 @@ interface ShortTermEvent {
 interface LongTermInsight {
   id: string;
   tenantId: string;
+  spaceId: string;
   appId: string;
   actorId: string;
+  scope: MemoryScope;
+  threadId: string | null;
   type: 'fact' | 'preference' | 'summary' | 'pattern';
   content: string;
   confidence: number;
@@ -64,6 +73,7 @@ function splitSentences(text: string): string[] {
 }
 
 export class DualLayerMemoryProvider implements MemoryProvider {
+  readonly defaultMinScore = 0.1;
   // First-class ingested records. The two derived layers below are built from these.
   private records = new Map<string, MemoryRecord>();
   private shortTermEvents = new Map<string, ShortTermEvent>();
@@ -140,9 +150,14 @@ export class DualLayerMemoryProvider implements MemoryProvider {
   async ingest(records: MemoryRecord[]): Promise<MemoryRecord[]> {
     const stored: MemoryRecord[] = [];
 
-    for (const record of records) {
+    for (const rawRecord of records) {
+      const record = normalizeRecordSpace(rawRecord);
       const id = record.id || this.newId('mem');
       const persisted: MemoryRecord = { ...record, id };
+      const existing = this.records.get(id);
+      if (existing && !sameMemoryOwner(existing, persisted)) {
+        throw new Error(`dual-layer-provider: refusing to move existing id ${id} to another ownership scope`);
+      }
       this.records.set(id, persisted);
       stored.push(persisted);
 
@@ -151,8 +166,11 @@ export class DualLayerMemoryProvider implements MemoryProvider {
         id: this.newId('event'),
         recordId: id,
         tenantId: record.tenantId,
+        spaceId: record.spaceId,
         appId: record.appId,
         actorId: record.actorId,
+        scope: record.scope,
+        threadId: record.threadId ?? null,
         sessionId: record.threadId || 'default',
         timestamp: new Date(),
         type: 'conversational',
@@ -258,8 +276,10 @@ export class DualLayerMemoryProvider implements MemoryProvider {
   private async createSessionSummary(event: ShortTermEvent): Promise<LongTermInsight[]> {
     // Create session summary after enough events accumulate in a session
     const sessionEvents = Array.from(this.shortTermEvents.values())
-      .filter(e => e.tenantId === event.tenantId && e.appId === event.appId &&
-                   e.sessionId === event.sessionId && e.actorId === event.actorId)
+      .filter(e => e.tenantId === event.tenantId && e.spaceId === event.spaceId &&
+                   e.appId === event.appId && e.actorId === event.actorId &&
+                   e.scope === event.scope && e.threadId === event.threadId &&
+                   e.sessionId === event.sessionId)
       .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
     if (sessionEvents.length < 5) return [];
@@ -308,8 +328,11 @@ export class DualLayerMemoryProvider implements MemoryProvider {
     return {
       id: this.newId('insight'),
       tenantId: event.tenantId,
+      spaceId: event.spaceId,
       appId: event.appId,
       actorId: event.actorId,
+      scope: event.scope,
+      threadId: event.threadId,
       type,
       content,
       confidence,
@@ -322,7 +345,7 @@ export class DualLayerMemoryProvider implements MemoryProvider {
   }
 
   private newId(prefix: string): string {
-    return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    return uid(prefix);
   }
 
   private async storeInsight(insight: LongTermInsight) {
@@ -333,16 +356,21 @@ export class DualLayerMemoryProvider implements MemoryProvider {
       existing.confidence = Math.max(existing.confidence, insight.confidence);
       existing.extractedFrom.push(...insight.extractedFrom);
       existing.lastUpdated = new Date();
+      this.invalidateCacheForRecords([this.insightToMemoryRecord(existing)]);
     } else {
       this.longTermInsights.set(insight.id, insight);
+      this.invalidateCacheForRecords([this.insightToMemoryRecord(insight)]);
     }
   }
 
   private findSimilarInsight(insight: LongTermInsight): LongTermInsight | null {
     for (const existing of this.longTermInsights.values()) {
       if (existing.tenantId === insight.tenantId &&
+          existing.spaceId === insight.spaceId &&
           existing.appId === insight.appId &&
           existing.actorId === insight.actorId &&
+          existing.scope === insight.scope &&
+          existing.threadId === insight.threadId &&
           existing.type === insight.type &&
           this.calculateTextSimilarity(existing.content, insight.content) > 0.8) {
         return existing;
@@ -402,7 +430,14 @@ export class DualLayerMemoryProvider implements MemoryProvider {
     const grouped = new Map<string, LongTermInsight[]>();
 
     for (const insight of this.longTermInsights.values()) {
-      const key = `${insight.tenantId}:${insight.appId}:${insight.actorId}`;
+      const key = JSON.stringify([
+        insight.tenantId,
+        insight.spaceId,
+        insight.appId,
+        insight.actorId,
+        insight.scope,
+        insight.threadId,
+      ]);
       if (!grouped.has(key)) {
         grouped.set(key, []);
       }
@@ -434,9 +469,14 @@ export class DualLayerMemoryProvider implements MemoryProvider {
       }
     }
 
+    const changed: MemoryRecord[] = [];
+    if (removed.size > 0 && insights[0]) {
+      changed.push(this.insightToMemoryRecord(insights[0]));
+    }
     for (const id of removed) {
       this.longTermInsights.delete(id);
     }
+    if (changed.length > 0) this.invalidateCacheForRecords(changed);
   }
 
   async search(query: MemorySearchQuery): Promise<MemorySearchHit[]> {
@@ -445,7 +485,11 @@ export class DualLayerMemoryProvider implements MemoryProvider {
 
     const cacheKey = this.searchCacheKey(query, filters);
     if (this.isCacheValid(cacheKey)) {
-      return [...(this.cache.get(cacheKey) ?? [])];
+      // Defense in depth: a cache implementation bug must never become an
+      // authorization bypass. Visibility is cheap over the already-bounded hit set.
+      return (this.cache.get(cacheKey) ?? []).filter((hit) =>
+        hit.memory.status === "active" && memoryVisibleTo(hit.memory, filters)
+      );
     }
 
     const limit = Math.min(Math.max(query.limit ?? 20, 1), 100);
@@ -501,27 +545,11 @@ export class DualLayerMemoryProvider implements MemoryProvider {
   // tenantId/appId are mandatory: an under-specified filter must return nothing,
   // never every tenant's memories.
   private requireFilters(filters: MemoryFilters | undefined): MemoryFilters {
-    if (!filters?.tenantId || !filters?.appId) {
-      throw new Error("memory filters must include tenantId and appId");
-    }
-    return filters;
+    return requireMemoryAccess(filters);
   }
 
   private matchesFilters(record: MemoryRecord, filters: MemoryFilters): boolean {
-    if (record.tenantId !== filters.tenantId) return false;
-    if (record.appId !== filters.appId) return false;
-    if (filters.actorId && record.actorId !== filters.actorId) return false;
-    if (filters.threadId && record.threadId !== filters.threadId) return false;
-    if (filters.memoryTypes && filters.memoryTypes.length > 0 && !filters.memoryTypes.includes(record.memoryType)) return false;
-    if (filters.scope && filters.scope.length > 0 && !filters.scope.includes(record.scope)) return false;
-
-    if (filters.metadata) {
-      for (const [key, value] of Object.entries(filters.metadata)) {
-        if (record.metadata[key] !== value) return false;
-      }
-    }
-
-    return true;
+    return memoryVisibleTo(record, filters);
   }
 
   private insightRecords(): MemoryRecord[] {
@@ -532,10 +560,11 @@ export class DualLayerMemoryProvider implements MemoryProvider {
     return {
       id: insight.id,
       tenantId: insight.tenantId,
+      spaceId: insight.spaceId,
       appId: insight.appId,
       actorId: insight.actorId,
-      threadId: null,
-      scope: 'actor',
+      threadId: insight.threadId,
+      scope: insight.scope,
       memoryType: insight.type,
       text: insight.content,
       summary: insight.content.length > 100 ? `${insight.content.slice(0, 100)}...` : insight.content,
@@ -560,10 +589,11 @@ export class DualLayerMemoryProvider implements MemoryProvider {
     return {
       id: event.id,
       tenantId: event.tenantId,
+      spaceId: event.spaceId,
       appId: event.appId,
       actorId: event.actorId,
-      threadId: event.sessionId === 'default' ? null : event.sessionId,
-      scope: 'thread',
+      threadId: event.threadId,
+      scope: event.scope,
       memoryType: 'episode',
       text: event.content,
       summary: event.content.length > 100 ? `${event.content.slice(0, 100)}...` : event.content,
@@ -590,6 +620,8 @@ export class DualLayerMemoryProvider implements MemoryProvider {
   private searchCacheKey(query: MemorySearchQuery, filters: MemoryFilters): string {
     const variant = {
       query: query.query,
+      appId: filters.appId,
+      accessThreadId: filters.accessThreadId ?? null,
       threadId: filters.threadId ?? null,
       memoryTypes: [...(filters.memoryTypes ?? [])].sort(),
       scope: [...(filters.scope ?? [])].sort(),
@@ -599,7 +631,13 @@ export class DualLayerMemoryProvider implements MemoryProvider {
       limit: query.limit ?? null,
       minScore: query.minScore ?? null,
     };
-    return `search|${filters.tenantId}|${filters.appId}|${filters.actorId ?? '*'}|${JSON.stringify(variant)}`;
+    return JSON.stringify([
+      "search",
+      filters.tenantId,
+      accessSpaceId(filters),
+      filters.actorId ?? null,
+      variant,
+    ]);
   }
 
   private isCacheValid(key: string): boolean {
@@ -608,17 +646,25 @@ export class DualLayerMemoryProvider implements MemoryProvider {
     return Date.now() - lastUpdate.getTime() < this.cacheTimeout;
   }
 
-  // Invalidate every (tenant, app) touched by a batch, not just the first record's.
-  private invalidateCacheForRecords(records: Array<{ tenantId: string; appId: string }>) {
-    const prefixes = new Set(records.map((record) => `search|${record.tenantId}|${record.appId}|`));
-    for (const prefix of prefixes) {
-      this.invalidateCache(prefix);
-    }
-  }
-
-  private invalidateCache(prefix: string) {
+  // Invalidate every memory space touched by a batch, including searches made
+  // through a different producer app. Decode the JSON tuple instead of doing
+  // delimiter-prefix matching over caller-controlled identifiers.
+  private invalidateCacheForRecords(records: MemoryRecord[]) {
     for (const key of this.cache.keys()) {
-      if (key.startsWith(prefix)) {
+      let tuple: unknown;
+      try {
+        tuple = JSON.parse(key);
+      } catch {
+        tuple = null;
+      }
+      const parts = Array.isArray(tuple) ? tuple : [];
+      const tenantId = typeof parts[1] === "string" ? parts[1] : undefined;
+      const spaceId = typeof parts[2] === "string" ? parts[2] : undefined;
+      const affected = records.some((record) =>
+        record.tenantId === tenantId &&
+        (record.scope === "tenant" || recordSpaceId(record) === spaceId)
+      );
+      if (affected) {
         this.cache.delete(key);
         this.lastCacheUpdate.delete(key);
       }
@@ -638,26 +684,43 @@ export class DualLayerMemoryProvider implements MemoryProvider {
   private pruneExpired(): number {
     let archivedExpired = 0;
     const now = Date.now();
+    const retired: MemoryRecord[] = [];
     for (const record of this.records.values()) {
       if (record.status !== 'active') continue;
-      if (isExpired(record.lastSeenAt, record.decayPolicy, now)) {
+      if (isExpired(record, now)) {
         record.status = 'archived';
         record.updatedAt = new Date(now).toISOString();
+        this.removeDerivedForRecord(record.id);
+        retired.push(record);
         archivedExpired += 1;
       }
     }
+    if (retired.length > 0) this.invalidateCacheForRecords(retired);
     return archivedExpired;
+  }
+
+  private removeEventAndDerived(eventId: string): void {
+    this.shortTermEvents.delete(eventId);
+    this.processingQueue = this.processingQueue.filter((queuedId) => queuedId !== eventId);
+    for (const [insightId, insight] of this.longTermInsights.entries()) {
+      if (insight.extractedFrom.includes(eventId)) this.longTermInsights.delete(insightId);
+    }
+  }
+
+  /** Forgetting canonical evidence also forgets every projection derived from it. */
+  private removeDerivedForRecord(recordId: string): void {
+    const eventIds = [...this.shortTermEvents.values()]
+      .filter((event) => event.recordId === recordId)
+      .map((event) => event.id);
+    for (const eventId of eventIds) this.removeEventAndDerived(eventId);
   }
 
   async findDuplicate(candidate: MemoryRecord): Promise<MemoryRecord | null> {
     this.pruneExpired();
+    const key = memoryDedupeKey(candidate);
     for (const record of this.records.values()) {
       if (
-        record.tenantId === candidate.tenantId &&
-        record.appId === candidate.appId &&
-        record.actorId === candidate.actorId &&
-        record.memoryType === candidate.memoryType &&
-        record.text.toLowerCase() === candidate.text.toLowerCase() &&
+        memoryDedupeKey(record) === key &&
         record.status === "active"
       ) {
         return record;
@@ -677,6 +740,10 @@ export class DualLayerMemoryProvider implements MemoryProvider {
       return this.insightToMemoryRecord(insight);
     }
 
+    const existing = this.records.get(record.id);
+    if (existing && !sameMemoryOwner(existing, record)) {
+      throw new Error(`dual-layer-provider: refusing to move existing id ${record.id} to another ownership scope`);
+    }
     this.records.set(record.id, record);
     this.invalidateCacheForRecords([record]);
     return record;
@@ -686,8 +753,38 @@ export class DualLayerMemoryProvider implements MemoryProvider {
     this.pruneExpired();
     const found = this.resolveById(id);
     if (!found) return null;
-    if (scope && (found.tenantId !== scope.tenantId || found.appId !== scope.appId)) return null;
+    if (scope && !memoryVisibleToIdScope(found, scope)) return null;
     return found;
+  }
+
+  async retire(
+    id: string,
+    status: MemoryRetirementStatus,
+    metadataPatch: Record<string, unknown> | undefined,
+    scope: MemoryIdScope,
+  ): Promise<MemoryRecord | null> {
+    this.pruneExpired();
+    const found = this.resolveById(id);
+    if (!found || !memoryVisibleToIdScope(found, scope)) return null;
+    const retired: MemoryRecord = {
+      ...found,
+      status,
+      metadata: { ...found.metadata, ...(metadataPatch ?? {}) },
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (this.records.has(id)) {
+      this.records.set(id, retired);
+      this.removeDerivedForRecord(id);
+    } else if (this.longTermInsights.has(id)) {
+      // Legacy insight/event records do not carry a status field. Removing the
+      // active projection is the only way to uphold immediate retirement.
+      this.longTermInsights.delete(id);
+    } else {
+      this.removeEventAndDerived(id);
+    }
+    this.invalidateCacheForRecords([retired]);
+    return retired;
   }
 
   private resolveById(id: string): MemoryRecord | null {
@@ -725,16 +822,30 @@ export class DualLayerMemoryProvider implements MemoryProvider {
     return list;
   }
 
+  async listVisible(filters: MemoryFilters, limit = 1_000): Promise<MemoryRecord[]> {
+    this.requireFilters(filters);
+    this.pruneExpired();
+    const records = [...this.records.values(), ...this.insightRecords()]
+      .filter((record) => record.status === "active" && memoryVisibleTo(record, filters))
+      .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+    return records.slice(0, Math.max(0, limit));
+  }
+
   async applyFeedback(feedback: MemoryFeedbackInput): Promise<MemoryRecord | null> {
     this.pruneExpired();
 
     // Scope is optional on the input; honour it whenever the caller supplies it,
     // so an id from another tenant cannot be nudged or read back.
-    if (feedback.tenantId || feedback.appId) {
+    if (feedback.tenantId || feedback.spaceId || feedback.appId || feedback.actorId || feedback.accessThreadId) {
       const target = this.resolveById(feedback.memoryId);
       if (!target) return null;
-      if (feedback.tenantId && target.tenantId !== feedback.tenantId) return null;
-      if (feedback.appId && target.appId !== feedback.appId) return null;
+      if (!feedback.tenantId || !memoryVisibleToIdScope(target, {
+        tenantId: feedback.tenantId,
+        spaceId: feedback.spaceId,
+        appId: feedback.appId,
+        actorId: feedback.actorId,
+        accessThreadId: feedback.accessThreadId,
+      })) return null;
     }
 
     const now = new Date().toISOString();
@@ -754,8 +865,9 @@ export class DualLayerMemoryProvider implements MemoryProvider {
       if (feedback.signal === 'positive') insight.confidence = Math.min(1, insight.confidence + 0.05);
       if (feedback.signal === 'negative') insight.confidence = Math.max(0, insight.confidence - 0.05);
       insight.lastUpdated = new Date();
-      this.invalidateCacheForRecords([insight]);
-      return this.insightToMemoryRecord(insight);
+      const updated = this.insightToMemoryRecord(insight);
+      this.invalidateCacheForRecords([updated]);
+      return updated;
     }
 
     return null;
@@ -775,7 +887,7 @@ export class DualLayerMemoryProvider implements MemoryProvider {
     let archivedEvents = 0;
     for (const [id, event] of this.shortTermEvents.entries()) {
       if (now - event.timestamp.getTime() > eventRetentionMs) {
-        this.shortTermEvents.delete(id);
+        this.removeEventAndDerived(id);
         archivedEvents++;
       }
     }

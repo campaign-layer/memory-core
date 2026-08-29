@@ -29,8 +29,10 @@ export interface MemoryProvider {
   findDuplicate(candidate: MemoryRecord): Promise<MemoryRecord | null>;
   update(record: MemoryRecord): Promise<MemoryRecord>;
   search(query: MemorySearchQuery): Promise<MemorySearchHit[]>;
+  listVisible(filters: MemoryFilters, limit?: number): Promise<MemoryRecord[]>;
   listByActor(tenantId: string, appId: string, actorId: string): Promise<MemoryRecord[]>;
-  getById(id: string): Promise<MemoryRecord | null>;
+  getById(id: string, scope?: MemoryIdScope): Promise<MemoryRecord | null>;
+  retire(id, status, metadataPatch, scope: MemoryIdScope): Promise<MemoryRecord | null>;
   applyFeedback(feedback: MemoryFeedbackInput): Promise<MemoryRecord | null>;
   compact(): Promise<MemoryCompactResult>;
   health?(): Promise<ProviderHealthStatus>;
@@ -46,14 +48,20 @@ Contracts every implementation shares:
 
 - `search` caps `limit` at 100 and defaults it to 8 or 20 depending on the provider. Scores
   are contractually 0–1.
-- `filters.tenantId` and `filters.appId` are mandatory; `in-memory`, `dual-layer` and
-  `postgres` all throw rather than serve an unscoped query.
-- `findDuplicate` matches on **exact normalized text** within the same actor and memory type.
-  Nothing does semantic dedupe, so a revised fact is stored alongside the stale one, both
-  `active`.
-- `compact()` returns `{archivedExpired, archivedSuperseded}`. `archivedSuperseded` is
-  effectively always `0` — nothing on the write path sets status `superseded`. Only the
-  `supersede` MCP tool does.
+- `filters.tenantId` and `filters.appId` are mandatory; providers throw rather than serve an
+  unscoped query. `spaceId` is the stable sharing boundary and resolves to actor, then legacy
+  app, when omitted.
+- Visibility is centralized in `src/access.ts`: tenant crosses spaces; workspace crosses
+  actors/apps in one space; app, actor, and thread progressively narrow access. Id-addressed
+  operations accept the same caller scope so an opaque id cannot bypass private visibility.
+- `findDuplicate` matches on **exact normalized text** within the same visibility locus and
+  memory type. Nothing does semantic dedupe, so a revised fact is stored alongside the stale
+  one, both `active`.
+- `retire()` is a one-way, scope-checked active → `superseded`/`archived` mutation. Postgres
+  performs the visibility check and update in one statement; the REST status route cannot
+  restore a retired record.
+- `compact()` returns `{archivedExpired, archivedSuperseded}`. Explicit supersede flows set
+  the intermediate status; automatic contradiction resolution is not implemented.
 
 ## Selecting one
 
@@ -67,12 +75,9 @@ MEMORY_PROVIDER=file MEMORY_FILE_PATH=./data/mc.json npm run dev
 MEMORY_PROVIDER=postgres MEMORY_PG_URL=postgres://... MEMORY_EMBEDDER=local npm run dev
 ```
 
-Confirm what actually started with `/ready`; the `detail` string names the provider and the
-embedder:
-
-```
-"detail":"records=0, indexed=0, embedder=onnx:Xenova/bge-small-en-v1.5/384d vectors=0"
-```
+Confirm the provider kind and boolean status with `/ready`. The unauthenticated route omits
+model ids, row counts and failure details; in-process hosts can inspect those through
+`MemoryCoreService.getHealth()`.
 
 There are **no** `ENHANCED_*` or `DUAL_LAYER_*` environment variables. Earlier revisions of
 this file documented a dozen (`ENHANCED_SIMILARITY_THRESHOLD`, `DUAL_LAYER_MAX_EVENTS`,
@@ -127,7 +132,8 @@ score     = relevance * (0.7 + 0.3 * quality)                 # same quality ter
 - **Relevance gates, quality modulates.** Zero relevance can never produce a hit, which is
   why `foundRate` is 100%.
 - Candidates come from each ranker independently, `max(limit*5, 50)` of them, with
-  tenant/app/actor/type/scope filters applied *inside* each scan so scoping precedes ranking.
+  tenant/space/scope/app/actor/thread/type filters applied *inside* each scan so authorization
+  precedes ranking.
 - Hybrid hits carry a `components` object — `{fused, relevance, quality, bm25, bm25Rank,
   vector, vectorRank}` — and their `reasons` name the provenance (`"lexical and vector
   match"`, `"bm25 #3"`, `"vector #1"`). This is the only place in the codebase that exposes
@@ -242,12 +248,13 @@ extraction path — insight extraction is heuristic string work, not a model cal
 
 ## `postgres`
 
-`src/providers/postgres-provider.ts` + [`migrations/001_init.sql`](../migrations/001_init.sql).
+`src/providers/postgres-provider.ts` + the ordered SQL files in [`migrations/`](../migrations/).
 The only durable, multi-replica-safe backend.
 
 ```bash
 createdb memory_core_dev
 psql -d memory_core_dev -f migrations/001_init.sql
+psql -d memory_core_dev -f migrations/002_memory_spaces.sql
 MEMORY_PROVIDER=postgres MEMORY_PG_URL=postgres://localhost:5432/memory_core_dev npm run dev
 npm run test:pg   # provider tests, needs a reachable database
 ```
@@ -263,14 +270,15 @@ full-text path installs and works without it.
 - `text_hash` — `md5(lower(whitespace-collapsed text))`, giving index-backed exact dedupe
   instead of an O(N) `lower(text)` scan.
 
-Nine indexes, all leading with `(tenant_id, app_id)` because every read is tenant-scoped, and
-most partial on `status = 'active'` because virtually all reads are. Metadata uses
+Indexes cover both `(tenant_id, app_id)` provenance lookups and `(tenant_id, space_id)` access
+paths; most are partial on `status = 'active'` because virtually all reads are. Metadata uses
 `gin (metadata jsonb_path_ops)` — about half the size of `jsonb_ops` and it covers the `@>`
 containment form that `MemoryFilters.metadata` compiles to.
 
 **Embeddings: one narrow table per dimension.** `memory_embeddings_384`,
-`memory_embeddings_1024`, … provisioned on demand by
-`memory_core_ensure_embedding_dim(dims)`. pgvector requires a fixed dimension per HNSW index
+`memory_embeddings_1024`, … provisioned during deployment by
+`memory_core_ensure_embedding_dim(dims)`. Search/ingest only inspect existing schema and never
+execute DDL. pgvector requires a fixed dimension per HNSW index
 but the embedding model is pluggable, so one table per dimension keeps a true fixed-dim
 `vector(N)` column with a real HNSW index, lets several models coexist (distinguished by the
 `model` column), keeps `memories` free of wide nullable columns, and makes a re-embedding run
@@ -332,19 +340,26 @@ been changed.
 
 Constructor options: `pool` (a caller-owned pool is never ended by `close()`), `poolMax` (10),
 `connectionTimeoutMs` (5000), `idleTimeoutMs` (30000), `statementTimeoutMs` (30000, sent as a
-startup parameter to avoid an extra round trip), `embedOnIngest` (true), `rrfK` (60),
+startup parameter to avoid an extra round trip), `embedOnIngest` (true),
+`embedderCooldownMs` (60000), `rrfK` (60),
 `lexicalWeight` / `vectorWeight` (1), `candidateMultiplier` (8, capped at 1000 candidates),
 `hideExpiredOnRead` (true — filters decay-expired rows out of reads instead of waiting for
 `compact()`), `maxListRows` (1000, a safety cap on the otherwise unbounded `listByActor`),
-`autoMigrate` (false), `migrationFile`.
+`autoMigrate` (false), `migrationFile` (single-file override; the default applies all bundled
+versions).
 
 Operational notes:
 
-- `assertScope()` refuses any operation missing `tenantId` or `appId`.
-- Embeddings are resolved and vector literals computed **before** a transaction opens:
-  provisioning a new dimension needs a lock on `memories` that an open transaction would
-  block, and a network embedder has no business holding a transaction.
-- `MEMORY_PG_AUTO_MIGRATE=true` applies the migration on first use.
+- Search/list operations refuse filters missing `tenantId` or `appId`; scoped id reads and
+  writes require tenant plus a space or actor-derived personal space. An app id alone is not
+  an opaque-id capability.
+- Embedding tables are resolved read-only and vector literals are computed **before** a write
+  transaction opens; a network embedder has no business holding a transaction.
+- `MEMORY_PG_AUTO_MIGRATE=true` takes a Postgres advisory lock, verifies SHA-256 checksums,
+  applies only ledger-pending ordered migrations, and provisions a missing configured
+  embedding dimension before the production HTTP listener opens.
+- Search-time vector table/embedder failures log once, enter a cooldown, and execute the
+  lexical CTE without exposing hosted-provider details to HTTP callers.
 - `DEFAULT_PG_URL` is a developer-machine localhost URL. Always set `MEMORY_PG_URL` or
   `DATABASE_URL` explicitly.
 - **No retrieval number exists for this provider** — it is not registered in
@@ -366,23 +381,26 @@ tests:
 
 **Adoption so far:** `in-memory`/`file` use `BM25Index` and `rrf`, and expose per-stage
 component scores on hybrid hits; `postgres` accepts the `EmbeddingProvider` shape and does its
-own RRF in SQL. `mmr.ts` and `rerank.ts` are **unused** — no provider diversifies or reranks.
-`HybridRetriever` is exported from the package root but **is not on the service request
-path**; the providers reimplement the same shape internally, which is
+own RRF in SQL. `MemoryCoreService` now uses the `Reranker` interface as an optional,
+provider-independent cross-encoder stage, so REST and agent surfaces receive the same reranked
+order. `mmr.ts` remains unused — no provider diversifies. `HybridRetriever` is exported from
+the package root but **is not on the service request path**; the providers reimplement the
+same candidate/fusion shape internally, which is
 [Problem 1](./ARCHITECTURE.md#problem-1--the-provider-interface-conflates-storage-with-ranking).
 
 ## Adding a provider
 
-Step-by-step in [`CONTRIBUTING.md`](../CONTRIBUTING.md#adding-a-provider). The two rules that
-are not negotiable: enforce `tenantId` + `appId` on every read (throw on an unscoped query;
-never return everything), and register the provider in `bench/systems/index.ts` and run the
-harness with the `random` control before making any retrieval claim.
+Step-by-step in [`CONTRIBUTING.md`](../CONTRIBUTING.md#adding-a-provider). The rules that are
+not negotiable: enforce `tenantId` + `appId` on every query, implement the complete
+space/scope visibility policy (including id-addressed mutations), and register the provider in
+`bench/systems/index.ts` and run the harness with the `random` control before making any
+retrieval claim.
 
 ## Migrating between providers
 
 There is no export/import route. Earlier revisions of this file documented
 `POST /v1/memory/export` and `POST /v1/memory/import`; both return 404. Move data with
-`listByActor` per actor and re-`ingest` against the new provider, or at the storage layer
+`listVisible` per access space and re-`ingest` against the new provider, or at the storage layer
 (copy the JSON file, `pg_dump`).
 
 ## Troubleshooting
@@ -392,10 +410,11 @@ There is no export/import route. Earlier revisions of this file documented
 | `Invalid enum value` on startup | `MEMORY_PROVIDER` is not one of the five kinds. `src/config.ts` validates it with zod. |
 | `filePath is required when MEMORY_PROVIDER=file` | `MEMORY_FILE_PATH` unset and no default resolved. |
 | `MemoryFilters.tenantId and MemoryFilters.appId are required` | An unscoped search. Intentional. |
+| Id operation requires `tenantId plus spaceId or appId` | An unscoped opaque-id read/mutation on strict Postgres mode. Intentional. |
 | `postgres-provider: pgvector is not installed` | `CREATE EXTENSION vector;` in the target database. |
 | `embedder returned N dims but declares M` | The embedder's `dims` does not match its output. |
 | Search returns nothing | `minScore` defaults differ per provider (0.05 in-memory/enhanced, 0.1 dual-layer, 0.2 postgres). Pass `minScore: 0` to see the raw ranking. |
-| `archivedSuperseded` always 0 | Correct. Nothing on the write path sets that status. |
+| `archivedSuperseded` stays 0 | Expected unless an explicit supersede flow marked records before compaction; there is no automatic Resolver. |
 
 There is no `DEBUG=memory-core:*` support and no configurable log level. The HTTP layer logs
 one line per request to `console.log`.

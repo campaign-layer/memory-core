@@ -46,7 +46,7 @@ export interface OpenClawMcpOptions {
   command?: string;
   args?: string[];
   /** tenant/app/actor are required by memory-core and passed as env. */
-  identity: { tenantId: string; appId: string; actorId: string; threadId?: string };
+  identity: { tenantId: string; spaceId?: string; appId: string; actorId: string; threadId?: string };
   /** Set to proxy an existing memory-core HTTP service instead of embedding. */
   memoryCoreUrl?: string;
   apiKey?: string;
@@ -64,6 +64,7 @@ export function openClawMcpConfig(options: OpenClawMcpOptions): OpenClawMcpConfi
     MEMORY_APP_ID: options.identity.appId,
     MEMORY_ACTOR_ID: options.identity.actorId,
   };
+  if (options.identity.spaceId) env.MEMORY_SPACE_ID = options.identity.spaceId;
   if (options.identity.threadId) env.MEMORY_THREAD_ID = options.identity.threadId;
   if (options.memoryCoreUrl) env.MEMORY_CORE_URL = options.memoryCoreUrl;
   if (options.apiKey) env.MEMORY_CORE_API_KEY = options.apiKey;

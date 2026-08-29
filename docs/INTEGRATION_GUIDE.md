@@ -9,20 +9,32 @@ HTTP/SDK path.
 
 ## Identity model
 
-Four keys, resolved server-side wherever possible:
+Five keys, resolved server-side wherever possible:
 
-1. `tenantId` — org / network boundary. **Required.**
-2. `appId` — application boundary. **Required.**
-3. `actorId` — user / wallet / agent identity. Required on ingest; optional as a search filter,
-   but omitting it widens the search to the whole app.
-4. `threadId` — optional conversation / session id.
+1. `tenantId` — organization boundary. **Required.**
+2. `spaceId` — stable authorized sharing boundary inside the tenant. Optional for personal
+   callers, where it defaults to `actorId`; a team must set the same explicit value in every
+   participating agent.
+3. `appId` — producer application and app-scope boundary. **Required.** It is provenance, not
+   the general cross-agent read boundary.
+4. `actorId` — user / wallet / agent identity. Required on ingest and strongly recommended on
+   reads; actor-private records are invisible without it.
+5. `threadId` — optional source conversation id. Use `accessThreadId` on reads to authorize
+   thread-scoped records without filtering broader actor/workspace memories to that thread.
 
-`tenantId` and `appId` are mandatory on every search and context call; providers throw rather
-than serve an unscoped query. Note that API keys are **not** scoped to a tenant — a valid key
-reaches every tenant, so isolation protects against accidents, not a hostile caller.
+Visibility is explicit: `tenant` crosses spaces, `workspace` crosses actors and apps inside
+one space, `app` stays with one producer app, `actor` follows one actor across apps, and
+`thread` requires the same actor and current access thread. `tenantId` and `appId` remain
+mandatory on every search and context call; providers throw rather than serve an unscoped
+query.
 
-In the MCP and tool-calling paths, identity comes from server config and is never
-model-supplied, so a model cannot write into the wrong tenant.
+Use `MEMORY_CORE_PRINCIPAL_API_KEYS` for agent credentials. Each grant binds an exact tenant,
+effective space, producer app, and actor before any provider call; a caller cannot assert a
+different actor with the same valid key. `MEMORY_CORE_TENANT_API_KEYS` is deliberately more
+privileged: it is for tenant administrators or trusted identity-asserting gateways that may
+act as any actor in that tenant. Reserve `MEMORY_CORE_API_KEYS` for global operators. In MCP
+and tool-calling paths, identity comes from trusted server configuration, never model input.
+A principal-bound HTTP caller can select a thread only within its bound actor.
 
 ## Minimal loop
 
@@ -37,9 +49,13 @@ model-supplied, so a model cannot write into the wrong tenant.
    `selected` | `positive` | `negative`.
 4. **On a schedule** — `POST /v1/memory/compact` to archive decay-expired records.
 
-Watch for on step 1: the budget is counted in **characters, not tokens** (roughly 4x off, and
-model-dependent), selection is greedy with no diversity, and the profile block is built from a
-full unbounded actor scan on every call. Keep `maxItems` modest.
+Watch for on step 1: the complete emitted block obeys `maxChars`, but the budget is counted in
+**characters, not model tokens**. Query-relevant memories receive budget priority; selection
+still has no measured diversity policy, and the profile block scans up to 1,000 visible
+records on every call. Each emitted line carries its memory id, scope, tenant, space, app,
+actor, event time, and source type, and selected text is not silently shortened;
+treat the block as stored evidence at the same or lower authority as the current user message,
+not as a system instruction. Keep `maxItems` modest.
 
 ## Required fields, in practice
 
@@ -62,9 +78,12 @@ The validation that bites most often (`src/http.ts`):
 - `text` must be **≥ 4 characters**; it is whitespace-collapsed and truncated to 1000.
 - `memoryType` is one of `fact`, `preference`, `goal`, `project`, `episode`, `tool_outcome`,
   `instruction`, `profile`, `pattern`, `summary`.
-- Optional: `threadId`, `scope`, `summary`, `metadata`, `confidence`, `importance`,
+- Optional: `spaceId`, `threadId`, `scope`, `summary`, `metadata`, `confidence`, `importance`,
   `decayPolicy`, `observedAt`.
-- Search/context `filters` require `tenantId` **and** `appId`.
+- Search/context `filters` require `tenantId` **and** `appId`. Set an explicit `spaceId` for
+  a shared team space; personal integrations can rely on the `actorId` default.
+- HTTP feedback requires `tenantId`, `appId`, and `actorId`; pass `spaceId` plus
+  `accessThreadId` when applicable.
 
 ## From TypeScript
 

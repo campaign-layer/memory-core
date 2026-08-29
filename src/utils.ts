@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import type { MemoryRecord } from "./types.js";
+
 const STOPWORDS = new Set([
   "the",
   "a",
@@ -70,15 +73,17 @@ export function clamp(value: number, min: number, max: number): number {
 }
 
 export function uid(prefix = "mem"): string {
-  const rand = Math.random().toString(36).slice(2, 10);
-  return `${prefix}_${Date.now()}_${rand}`;
+  return `${prefix}_${randomUUID()}`;
 }
 
-export function isExpired(lastSeenAt: string, decayPolicy: DecayPolicy, now = Date.now()): boolean {
-  if (decayPolicy.kind === "none") return false;
-  const ttlDays = decayPolicy.ttlDays ?? 180;
+export function isExpired(
+  record: Pick<MemoryRecord, "createdAt" | "lastSeenAt" | "decayPolicy">,
+  now = Date.now(),
+): boolean {
+  if (record.decayPolicy.kind === "none") return false;
+  const ttlDays = record.decayPolicy.ttlDays ?? 180;
   if (ttlDays <= 0) return false;
-  const ageMs = now - new Date(lastSeenAt).getTime();
+  const anchor = record.decayPolicy.kind === "time" ? record.createdAt : record.lastSeenAt;
+  const ageMs = now - new Date(anchor).getTime();
   return ageMs > ttlDays * 24 * 60 * 60 * 1000;
 }
-import type { DecayPolicy } from "./types.js";

@@ -40,7 +40,7 @@ export interface HermesMcpOptions {
   command?: string;
   args?: string[];
   cwd?: string;
-  identity: { tenantId: string; appId: string; actorId: string; threadId?: string };
+  identity: { tenantId: string; spaceId?: string; appId: string; actorId: string; threadId?: string };
   memoryCoreUrl?: string;
   apiKey?: string;
   provider?: "in-memory" | "file" | "enhanced" | "dual-layer";
@@ -64,6 +64,7 @@ export function hermesMcpConfig(options: HermesMcpOptions): {
     MEMORY_APP_ID: options.identity.appId,
     MEMORY_ACTOR_ID: options.identity.actorId,
   };
+  if (options.identity.spaceId) env.MEMORY_SPACE_ID = options.identity.spaceId;
   if (options.identity.threadId) env.MEMORY_THREAD_ID = options.identity.threadId;
   if (options.memoryCoreUrl) env.MEMORY_CORE_URL = options.memoryCoreUrl;
   if (options.apiKey) env.MEMORY_CORE_API_KEY = options.apiKey;

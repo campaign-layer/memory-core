@@ -1,4 +1,5 @@
 import { MEMORY_TOOL_NAMES, dispatch, toAnthropicTools, type MemoryToolContext } from "../tools.js";
+import { frameUntrustedMemory } from "./prompt-memory.js";
 
 // Anthropic Messages API wiring: recall before generation, tool-use loop,
 // remember after. Structurally typed against @anthropic-ai/sdk so memory-core
@@ -98,7 +99,10 @@ export async function runAnthropicTurn(
     if (context.ok) contextInjected = context.text;
   }
 
-  const systemParts = [options.system, contextInjected ? `<memory>\n${contextInjected}\n</memory>` : ""]
+  const systemParts = [
+    options.system,
+    contextInjected ? frameUntrustedMemory(contextInjected) : "",
+  ]
     .filter((part): part is string => Boolean(part && part.trim()));
 
   const messages: AnthropicMessageParam[] = [{ role: "user", content: userMessage }];

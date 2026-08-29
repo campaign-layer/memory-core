@@ -9,6 +9,7 @@ import {
   type MemoryToolContext,
   type MemoryToolResult,
 } from "../tools.js";
+import { frameUntrustedMemory } from "./prompt-memory.js";
 
 // Framework-agnostic toolkit. Any agent runtime that can (a) list tools with a
 // JSON Schema and (b) call one by name can be wired up with this.
@@ -60,7 +61,7 @@ export function createMemoryToolkit(ctx: MemoryToolContext): MemoryToolkit {
         ...(budget?.maxItems ? { maxItems: budget.maxItems } : {}),
         ...(budget?.maxChars ? { maxChars: budget.maxChars } : {}),
       });
-      return result.ok ? result.text : "";
+      return result.ok ? frameUntrustedMemory(result.text) : "";
     },
     capture(text, options) {
       return call("remember", { text, ...(options ?? {}) });

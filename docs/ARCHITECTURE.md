@@ -9,7 +9,7 @@ fixed, and benchmarking against public datasets changed the priority order. What
 follows is the current state; the original analysis is kept intact underneath
 because the reasoning still explains *why* the design was wrong.
 
-**Fixed and measured**
+**Fixed or verified**
 
 | Was | Now |
 |---|---|
@@ -21,6 +21,12 @@ because the reasoning still explains *why* the design was wrong.
 | `MEMORY_PROVIDER=dual-layer` crashed at boot | Config enum derived from `MemoryProviderKind` |
 | Dockerfile installed prod deps then ran `tsc` | Multi-stage build (note: PaaS builders that autodetect Node ignore the Dockerfile entirely) |
 | Benchmark-overfit gazetteers and a hardcoded gold answer | Deleted; the string was verbatim LongMemEval question 1's answer |
+| Scope hierarchy was decorative | Central visibility policy now enforces tenant/space/app/actor/thread semantics across providers and opaque-id mutations |
+| Remote forget/supersede could only downrank | Provider-level scoped retirement plus REST get/status APIs now remove retired ids from every active read path |
+| `buildContext` profile read was unbounded | `listVisible()` caps the provider scan at 1,000 records; relevance and caching remain open |
+| `buildContext.maxChars` ignored profile/header output | The complete prompt is bounded; relevant evidence wins budget priority, profile duplicates are removed, and full emitted evidence carries id/scope/tenant/space/app/actor/event/source provenance |
+| Valid tenant keys could impersonate any actor | Normal keys bind tenant/space/app/actor; tenant-wide identity assertion is an explicit admin grant and global keys are operator-only |
+| Reranker existed only as dead retrieval scaffolding | Optional Voyage cross-encoder now reranks a bounded provider candidate set at the service seam with score gating and fail-open cooldown |
 
 **Measured retrieval quality** (see `docs/BENCHMARKS.md` for commands)
 
@@ -86,11 +92,52 @@ because the reasoning still explains *why* the design was wrong.
    retrieval systems compress under a low ceiling. Rank metrics are the signal.
 
 **Still open** — Problems 1, 2, 4, 6 and 9 below stand substantially as written:
-four ranking implementations still exist (no `MemoryStore`/`Retriever` split), there
-is still no Extractor or Resolver, nothing ever sets `superseded`, `buildContext`
-still budgets in characters rather than tokens with MMR unwired, tenant scope is
-still a filter argument rather than a structural handle, and there is no learning
-loop. Retrieval is now hybrid but still single-shot: no multi-hop.
+four ranking implementations still exist (no `MemoryStore`/`Retriever` split), the opt-in
+Extractor is unmeasured and there is no Resolver, only explicit lifecycle tools/API calls set
+`superseded`, `buildContext` still budgets in characters rather than model tokens with MMR unwired,
+tenant scope is still a filter argument rather than a structural handle, and there is no
+learning loop. Retrieval is now hybrid and can be cross-encoder reranked, but remains
+single-shot: no multi-hop.
+
+## 2026 north star
+
+This is a direction, not a claim that paper scores are comparable to our harness. Current
+systems point to a memory pipeline that is materially richer than flat top-k retrieval:
+
+- **Keep evidence distinct from inference.** Raw observations and agent experiences should be
+  immutable evidence; entity summaries and beliefs should be derived, revision-linked, and
+  explainable back to that evidence. [Hindsight](https://arxiv.org/abs/2512.12818) makes this
+  separation explicit across world facts, experiences, summaries, and evolving beliefs.
+- **Make time and consolidation first-class.** Atomic traces need event time, validity time,
+  and relationships to thematic scenes and profiles rather than destructive replacement.
+  [EverMemOS](https://arxiv.org/abs/2601.02163) describes a trace → scene → reconstructive
+  recollection lifecycle.
+- **Keep fresh evidence queryable while maintenance runs asynchronously.** Extraction can be
+  parallel, while summaries refresh only along dirty hierarchical paths; the foreground write
+  should not wait for a global reorganization. [MemForest](https://arxiv.org/abs/2605.23986)
+  treats this as a temporal data-management problem.
+- **Evaluate experience, not only remembered chat facts.**
+  [LongMemEval-V2](https://arxiv.org/abs/2605.12493) covers state, workflows, environment
+  gotchas, and false-premise awareness over agent trajectories;
+  [PersonaMem-v2](https://arxiv.org/abs/2512.06688) targets preferences that are mostly
+  implicit rather than directly stated.
+
+The implementation sequence follows from those constraints:
+
+1. Finish access, durability, migration, and observability contracts; quality work on an
+   unsafe substrate is not shippable.
+2. Add an evidence ledger plus Resolver: `derivedFrom`, `supersedes`, valid-time intervals,
+   contradiction candidates, and atomic revision commits. Never discard source evidence.
+3. Move extraction and consolidation behind an idempotent queue/outbox. Make atomic memories
+   visible immediately; refresh entity/profile/scene projections asynchronously and locally.
+4. Split `MemoryStore` from retrieval. Add temporal/entity expansion, calibrated candidate
+   scoring, a reranker, token-aware diverse context selection, and evidence citations.
+5. Gate releases on end-to-end `buildContext` evaluation: current synthetic/LoCoMo/
+   LongMemEval, then LongMemEval-V2 and implicit-persona slices, with stale-answer rate,
+   abstention, isolation, freshness latency, throughput, cost, and recovery tests.
+6. Build on the tenant-bound credential edge with audit events, distributed quotas,
+   metrics/tracing, backups, restore drills, and multi-replica soak tests before calling the
+   service production-ready.
 
 ## Thesis
 
@@ -215,9 +262,12 @@ Ranked by real-world impact. N = records in store.
 
 ---
 
-## Problem 10 — Deployment
+## Problem 10 — Deployment (historical finding)
 
-`Dockerfile` runs `npm ci --only=production`, then `npm run build` (tsc) — but `@types/node` and `@types/express` are devDependencies, so the build cannot succeed. The rate limiter is per-process, so it is decorative behind more than one replica. No CI exists.
+The original `Dockerfile` ran `npm ci --only=production`, then `npm run build` (tsc), although
+the compiler and type packages were devDependencies. That build failure is fixed by the
+multi-stage image described in the status table above. Remaining gaps include per-process
+rate limiting, dependency-audit release blockers, and no CI.
 
 ---
 

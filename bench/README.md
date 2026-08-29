@@ -85,6 +85,36 @@ npx tsx bench/run.ts --systems=in-memory,enhanced,bm25,random,naive-rag --size=s
 `bench/run.ts` generates the fixture automatically if it is missing, so a bare
 `npx tsx bench/run.ts` works from a clean checkout.
 
+The agent-facing context surface has a separate internal regression command:
+
+```bash
+npm run bench:context
+npx tsx bench/context.ts --size=large --max-items=8 --max-chars=3000 \
+  --time-anchor=2026-08-28T00:00:00.000Z --json=bench/out/context-large.json
+
+# credentialed semantic precision/abstention run; fails rather than silently falling back
+VOYAGE_API_KEY=... npx tsx bench/context.ts --reranker=voyage \
+  --reranker-model=rerank-2.5 --reranker-min-score=0.2
+```
+
+It runs `MemoryCoreService.buildContext` and reports gold evidence retained, all-gold rate,
+gold-at-one/MRR, stale and hard-negative inclusion, whether either outranked the current/gold
+evidence, abstention leakage, near-duplicate selection, exact character-budget violations,
+utilization, and latency. Inclusion and ordering are deliberately separate: a distractor
+appearing at the bottom of an eight-item evidence block is not the same failure as it beating
+the answer. It uses the same repository-authored synthetic corpus, so it is a regression
+gate—not an end-to-end answer-quality or public SOTA score.
+
+CI passes `--assert-baseline`, which applies deliberately loose floors/ceilings around the
+deterministic 2026-08-29 internal result. It catches accidental code regressions; it is not a
+public quality threshold and does not waive the held-out evaluation gate.
+
+`--reranker=voyage` reranks at most 50 BM25 candidates per query through the same service
+path production agents use. It requires `VOYAGE_API_KEY`; a missing key is a hard benchmark
+error so a baseline fallback can never be mislabeled as a reranker result. Tune
+`--reranker-min-score=0..1` on a development split and report retention beside abstention—do
+not choose it on the test queries.
+
 #### Flags
 
 | flag | default | meaning |

@@ -71,6 +71,7 @@ function toRecord(m: MaterializedMemory, actorId: string): MemoryRecord {
   return {
     id: m.id,
     tenantId: TENANT,
+    spaceId: actorId,
     appId: APP,
     actorId,
     threadId: m.sessionId,

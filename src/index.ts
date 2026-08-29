@@ -4,8 +4,10 @@ import { loadConfig, type MemoryCoreConfig } from "./config.js";
 import { createExtractor } from "./extraction/index.js";
 import { createMemoryProvider } from "./providers/factory.js";
 import { MemoryCoreService } from "./service.js";
+import { createReranker } from "./retrieval/rerank.js";
 
 export * from "./types.js";
+export * from "./access.js";
 export * from "./extraction/index.js";
 export * from "./provider.js";
 export * from "./service.js";
@@ -35,10 +37,17 @@ export function createMemoryCoreFromConfig(config: MemoryCoreConfig) {
     embeddingModel: config.embeddingModel,
     embedderSpec: config.embedder,
   });
-  const service = new MemoryCoreService(provider, { extractor: createExtractor(config.extractor) });
+  const service = new MemoryCoreService(provider, {
+    extractor: createExtractor(config.extractor),
+    reranker: createReranker(config.reranker ?? { kind: "none" }),
+    rerankerMinScore: config.rerankerMinScore,
+  });
   const app = createMemoryCoreApp(service, {
     apiKeys: config.apiKeys,
+    tenantApiKeys: config.tenantApiKeys,
+    principalApiKeys: config.principalApiKeys,
     rateLimitPerMin: config.rateLimitPerMin,
+    trustProxyHops: config.trustProxyHops,
   });
   return { provider, service, app, config };
 }
@@ -53,10 +62,17 @@ export function createDefaultMemoryCore(options: CreateMemoryCoreOptions = {}) {
     embeddingModel: config.embeddingModel,
     embedderSpec: config.embedder,
   });
-  const service = new MemoryCoreService(provider, { extractor: createExtractor(config.extractor) });
+  const service = new MemoryCoreService(provider, {
+    extractor: createExtractor(config.extractor),
+    reranker: createReranker(config.reranker ?? { kind: "none" }),
+    rerankerMinScore: config.rerankerMinScore,
+  });
   const app = createMemoryCoreApp(service, {
     apiKeys: config.apiKeys,
+    tenantApiKeys: config.tenantApiKeys,
+    principalApiKeys: config.principalApiKeys,
     rateLimitPerMin: config.rateLimitPerMin,
+    trustProxyHops: config.trustProxyHops,
   });
   return { provider, service, app, config };
 }

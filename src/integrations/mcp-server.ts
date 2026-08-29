@@ -45,6 +45,7 @@ function pick(env: NodeJS.ProcessEnv, ...keys: string[]): string | undefined {
 
 const CONFIG_HELP = `memory-core MCP server requires identity env vars:
   MEMORY_TENANT_ID   tenant that owns the memories (required)
+  MEMORY_SPACE_ID    stable personal/workspace memory space (default: actor id)
   MEMORY_APP_ID      app / product writing the memories (required)
   MEMORY_ACTOR_ID    the end user or agent the memories belong to (required)
   MEMORY_THREAD_ID   optional conversation id
@@ -94,6 +95,7 @@ export function loadMcpConfig(env: NodeJS.ProcessEnv = process.env): McpServerCo
     mode,
     identity: {
       tenantId: tenantId!,
+      spaceId: pick(env, "MEMORY_SPACE_ID", "MEMORY_CORE_SPACE_ID"),
       appId: appId!,
       actorId: actorId!,
       threadId: pick(env, "MEMORY_THREAD_ID", "MEMORY_CORE_THREAD_ID"),
@@ -182,16 +184,47 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   );
 
   let closing = false;
+  const CLOSE_TIMEOUT_MS = 5_000;
+  const closeWithin = async (label: string, close: () => void | Promise<void>) => {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.resolve().then(close),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`${label} exceeded ${CLOSE_TIMEOUT_MS}ms`)),
+            CLOSE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
   const shutdown = async (signal: string) => {
     if (closing) return;
     closing = true;
     process.stderr.write(`[memory-core-mcp] ${signal} received, closing\n`);
-    try {
-      await server.close();
-    } catch {
-      // transport already gone
+    let exitCode = 0;
+    if (signal !== "transport close") {
+      try {
+        await closeWithin("MCP server close", () => server.close());
+      } catch (error) {
+        exitCode = 1;
+        process.stderr.write(
+          `[memory-core-mcp] server close failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
     }
-    process.exit(0);
+    try {
+      if (backend.close) await closeWithin("provider close", () => backend.close!());
+    } catch (error) {
+      exitCode = 1;
+      process.stderr.write(
+        `[memory-core-mcp] provider close failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+    process.exit(exitCode);
   };
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
