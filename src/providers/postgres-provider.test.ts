@@ -208,7 +208,8 @@ test("health reports connectivity, server version and constant-cost row estimate
   assert.equal(status.ok, true);
   assert.equal(status.provider, "postgres");
   assert.match(status.detail ?? "", /pg=\d+/);
-  assert.match(status.detail ?? "", /rows_estimate=\d+/);
+  // reltuples is -1 until a freshly created relation has been analyzed.
+  assert.match(status.detail ?? "", /rows_estimate=-?\d+/);
 });
 
 test("migration ledger records ordered schema versions and source checksums", { skip }, async () => {
@@ -981,7 +982,7 @@ test("hybrid RRF lets vector proximity overturn lexical-only ranking", { skip: s
     // Lexical only: the distractor shares every query term, so it wins.
     const lexicalOnly = await provider!.search({
       query: QUERY,
-      filters: { tenantId: t, appId: APP },
+      filters: { tenantId: t, appId: APP, actorId: "actor_hybrid" },
       limit: 10,
       minScore: 0,
     });
@@ -996,7 +997,7 @@ test("hybrid RRF lets vector proximity overturn lexical-only ranking", { skip: s
     // rank 9, and RRF flips the ordering.
     const fused = await hybrid.search({
       query: QUERY,
-      filters: { tenantId: t, appId: APP },
+      filters: { tenantId: t, appId: APP, actorId: "actor_hybrid" },
       limit: 10,
       minScore: 0,
     });
@@ -1046,7 +1047,7 @@ test("vector recall finds rows with no lexical overlap at all", { skip: skipVect
     // has to come from the vector CTE.
     const hits = await hybrid.search({
       query: FILLERS[0],
-      filters: { tenantId: t, appId: APP },
+      filters: { tenantId: t, appId: APP, actorId: "actor_vec" },
       limit: 5,
       minScore: 0,
     });
