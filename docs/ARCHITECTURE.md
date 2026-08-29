@@ -99,6 +99,271 @@ tenant scope is still a filter argument rather than a structural handle, and the
 learning loop. Retrieval is now hybrid and can be cross-encoder reranked, but remains
 single-shot: no multi-hop.
 
+## Reviewed production target (2026-08-29)
+
+Status: **proposed; production release remains blocked**.
+
+This design incorporates the current benchmark and sandbox evidence plus independently
+reproduced findings recovered from an incomplete local Kimi review. A new live Kimi
+architecture dialogue was attempted, but the local provider returned its five-hour quota
+error before producing a proposal. Nothing in this section is represented as Kimi sign-off;
+it is written as an ADR-grade brief that can be challenged verbatim when the quota resets.
+
+### Complete current gap register
+
+| Priority | Current gap | Required invariant |
+|---|---|---|
+| P1 | Default HTTP bind is `0.0.0.0`; empty key configuration disables auth | Loopback by default; non-loopback without credentials must fail closed |
+| P1 | `MemoryCoreClient` follows redirects with `x-api-key` and has no whole-request deadline | Reject redirects, bound the operation, require HTTPS except loopback |
+| P2 | Extractor exceptions can admit raw, unlabelled text to prompt context | Failed extraction stores evidence only; no prompt-eligible claim is created |
+| P2 | Dedupe and writes are TOCTOU; concurrent identical ingest duplicates and a batch can partially commit | One idempotent, all-or-nothing store command |
+| P2 | Remote supersede is create → feedback → retire across requests | One compare-and-swap revision transaction |
+| P2 | Extracted facts retain transient turn indexes but not durable source text/spans | Every accepted version links to immutable evidence ids and hashes/spans |
+| P2 | Direct provider `getById` can be called without a scope | Every store operation requires a resolved access context |
+| P2 | Hosted `Retry-After` can exceed configured retry/backoff intent | Clamp sleep and all retries to one operation deadline |
+| P2 | Migration 002 performs a full backfill and non-concurrent index builds in one rollout transaction | Expand/migrate/contract; heavy work runs in a dedicated migrator |
+| P2 | Benchmark artifacts omit or contradict SHA/dirty/provider/RRF configuration | Release artifacts carry a complete, clean, reproducible manifest |
+| Quality | Large context regression selected stale evidence and leaked on every abstention case | Search current accepted heads; return explicit answerable/abstain/conflict state |
+| Quality | Profiles are recency slices; a live sandbox omitted a relevant Caddy instruction from `profileSummary` | Structured profile items are authoritative and render deterministically |
+| Quality | Corrected instructions can silently fall back to confidence `0.7` and a 180-day TTL | Revisions inherit load-bearing fields unless explicitly changed |
+| Reliability | File storage has no multi-process writer exclusion | Refuse a second writer; crash-safe atomic snapshots; never distributed file mode |
+| Operations | No durable audit sink, fleet quota, metrics/tracing, restore drill, or multi-replica soak | Transactional mutation audit plus shared quota/telemetry and proven recovery |
+| Breadth | No mature automatic profiles, multimodal ingestion, connectors, or consolidation | Defer breadth until correctness and held-out quality gates pass |
+
+Documentation/CI hygiene is part of P0 rather than architecture: the readiness quickstart,
+package import paths, MCP verification coverage, and benchmark provenance must stay executable
+from a clean checkout.
+
+### Decision: relational evidence ledger, not a general graph
+
+The smallest coherent design is a deterministic state machine around four durable concepts:
+
+1. **Observation:** immutable source evidence received from a user, tool, import, or agent.
+2. **Series:** stable logical identity and visibility boundary for one evolving memory.
+3. **Version:** immutable accepted content for one revision of a series.
+4. **Current head:** one transactionally maintained pointer to the version used by normal
+   retrieval.
+
+An optional narrow relation projection may record `supports`, `contradicts`, `duplicates`,
+and `derived_from`. It is rebuildable and never authoritative for access or current-head
+selection; predecessor revision plus the head event are the authoritative supersession
+record. This is not a graph database, ontology, or license for an LLM to rewrite truth.
+Similarity may propose a relation; only a validated command may advance the current head.
+
+```text
+Agent surfaces: Claude / Codex / Hermes / REST / SDK
+                         │
+               authenticated gateway
+          credential → ResolvedAccessContext
+                         │
+              ┌──────────┴──────────┐
+              │                     │
+       command/write path      query/read path
+ evidence → candidate →        current accepted heads
+ validate → resolve →          → BM25 ∥ ANN → fuse
+ atomic commit + outbox        → optional rerank
+              │                → truth decision
+              └──────────┬──────────┘
+                         │
+       Postgres: evidence · series · versions · heads
+       relations · idempotency · audit/outbox · projections
+```
+
+Postgres remains the production store. In-memory implements the same command semantics under
+one mutex for tests. File mode uses one process lock and copy-on-write snapshot publication;
+it is a local single-writer option, never a multi-replica database.
+
+### Storage contract
+
+The expand-only V2 schema should contain:
+
+- `memory_observations`: principal, source event/session, observed/received time, immutable
+  content hash, optional encrypted content or immutable source URI, and assertion kind;
+- `memory_series`: immutable tenant/space/app/actor/thread/scope/type coordinates,
+  collision-safe visibility key, state, revision counter, and current version id;
+- `memory_versions`: series id, revision, text/summary, effective and recorded time,
+  confidence, importance, decay policy, and creating principal;
+- `memory_version_evidence`: version ↔ observation links with source hash and optional spans;
+- optional `memory_relations`: the bounded, rebuildable relation vocabulary above,
+  version-aware where necessary;
+- `memory_head_events`: append-only created/revised/retired transitions for audit and `asOf`;
+- `memory_candidates` plus extraction jobs: pending/quarantined/rejected derived output;
+- `memory_operations`: `(tenant, principal, idempotencyKey)` plus request hash, operation id,
+  stored response, state, and expiry;
+- an audit/outbox record committed in the same transaction as each mutation.
+
+Embeddings attach to immutable `versionId`, not the logical series. Normal retrieval indexes
+only current, accepted, non-expired heads. A unique active-content constraint over the exact
+visibility tuple, memory type, and normalized content hash closes the concurrent exact-dedupe
+race.
+
+### Access and transport contract
+
+`ResolvedAccessContext` is created from the authenticated credential at the gateway and is a
+mandatory argument to every store command/query. Normal principals cannot assert a different
+tenant, space, app, or actor; they may select only a narrower thread. The provider interface
+has no optional-scope id read.
+
+The fail-closed startup matrix is:
+
+- default `HOST=127.0.0.1`;
+- production requires Postgres, an explicit database URL, at least one credential, and
+  application auto-migration disabled;
+- a development-only insecure-listen override may permit a non-loopback unauthenticated bind
+  after an explicit warning; production rejects that override;
+- no developer-specific Postgres URL fallback;
+- `/health` and `/ready` stay minimal, while authenticated operations status carries detailed
+  degradation counters.
+
+The SDK defaults to `redirect: "error"`, a 10-second total deadline, bounded response bytes,
+at most one safe retry, and a clamped `Retry-After`. It rejects credentials in the URL and
+plain HTTP outside loopback. Mutations are retried only with an idempotency key; caller abort
+and the client deadline are combined.
+
+### Atomic command API
+
+Provider-level `findDuplicate → ingest/update` composition becomes one command boundary:
+
+```ts
+interface MemoryStore {
+  execute(
+    access: ResolvedAccessContext,
+    command: IngestBatch | ReviseMemory | RetireMemory | RecordFeedback,
+  ): Promise<MutationResult>;
+
+  get(access: ResolvedAccessContext, seriesId: string): Promise<MemoryView | null>;
+  search(access: ResolvedAccessContext, query: SearchCommand): Promise<SearchResult>;
+}
+```
+
+`POST /v2/memory/batches` requires `Idempotency-Key`. The same key and request hash returns
+the exact stored response; the same key with a different hash returns 409. Atomic batches
+expose only all observations or none.
+
+`POST /v2/memory/series/{seriesId}/revisions` requires `Idempotency-Key` and
+`If-Match: <currentVersionId>`. In one transaction it locks the series, verifies the head,
+adds direct evidence if needed, inserts version N+1 with its predecessor, inherits omitted
+confidence/importance/decay, appends the head event, changes the head, writes audit/outbox,
+and commits. Optional relation projections are derived after the authoritative commit.
+Tenant, visibility scope, actor, and memory type cannot change during revision. Two concurrent
+revisions against one head yield one success and one 409, never two active truths.
+
+### Extraction trust boundary
+
+Raw turns and extracted claims are different inputs:
+
+- explicit atomic observations from an authorized caller may enter validation directly;
+- raw turns are immutable evidence and create an asynchronous extraction job;
+- extracted output starts as a candidate, not a memory;
+- admission requires durable evidence, scope no broader than every source, grounding/schema
+  checks, and type-specific policy;
+- extractor failure records `retryable_failed` or `terminal_failed` and produces no
+  prompt-visible version;
+- derived shared `instruction` memories require direct assertion or administrator approval.
+
+LLM extraction never runs inside the database transaction. Persist evidence first, extract
+outside the transaction, then admit a validated candidate through the same idempotent command
+path.
+
+### Current truth, abstention, and profiles
+
+The read path filters to current accepted heads before lexical/vector retrieval. An explicit
+revision wins within a series; late historical evidence does not silently replace the head;
+unresolved contradictory series return `conflict`; similarity alone cannot rewrite state.
+An optional `asOf` query evaluates head events and effective time.
+
+V2 context returns a decision independent from retrieval rank:
+
+```json
+{
+  "decision": {
+    "status": "answerable",
+    "confidence": 0.91,
+    "policyVersion": "resolver-v1",
+    "reasonCodes": ["current_head", "direct_evidence"]
+  },
+  "items": [{
+    "seriesId": "...",
+    "versionId": "...",
+    "evidenceIds": ["..."],
+    "placement": "relevant",
+    "text": "..."
+  }],
+  "omissions": []
+}
+```
+
+Status is `answerable`, `abstain`, or `conflict`. Thresholds are frozen on a calibration
+split before held-out evaluation; the max-normalized retrieval score is never reused as truth
+confidence.
+
+Profiles are structured current-head projections. Stable ordering is section priority,
+importance, effective time, then series id. The prose summary renders from exactly the
+returned items, every sentence maps to a series/version, and every omitted eligible item has
+a reason such as `budget`. V1 `profileSummary` is generated from the same item set during
+compatibility; free-standing prose is not authoritative.
+
+### Migration and delivery order
+
+**P0-A — immediate security/correctness**
+
+- fail-closed startup, explicit Postgres URL, SDK redirect/deadline/size/retry bounds;
+- extraction failures quarantined, quickstart fixed, MCP verification in CI;
+- provider id access scoped in new code, clean benchmark manifests required.
+
+**P0-B — transactional mutation core**
+
+- expand-only V2 tables, dedicated heavy-data migrator, persisted idempotency;
+- atomic batch ingest and single-call CAS revision;
+- file single-writer lock and crash-safe snapshot;
+- MCP/Hermes supersede moved to the revision endpoint.
+
+**P0-C — compatibility cutover**
+
+- route V1 writes through V2 commands;
+- backfill each legacy record as one series/version with synthetic `legacy_import` evidence,
+  explicitly marking original evidence unavailable rather than inventing it;
+- preserve the legacy id as `seriesId`, add `versionId`, shadow-read and compare visibility/
+  ranking/context, then switch reads and stop legacy writes.
+
+**P1 — temporal quality and operations**
+
+- relation candidates, deterministic conflict policy, structured profiles, calibrated
+  abstention, shared quotas, authenticated metrics/audit export;
+- multi-replica fault injection, rolling migration, backup/PITR restore and audit-continuity
+  drills;
+- held-out MemoryBench/LongMemEval-V2/PersonaMem/action benchmarks.
+
+### Release tests and quantitative gates
+
+P0 must include a startup auth/bind matrix; cross-origin redirect trap; adversarial
+`Retry-After`; concurrent idempotency replay/conflict; 100-way exact dedupe; fault injection
+at every batch boundary; disconnect-after-commit replay; competing CAS revisions; extractor
+throw/no-facts separation; derived-scope narrowing; mandatory scoped reads; file second-writer
+and fsync crash recovery; and REST/MCP principal-credential CI.
+
+P1 gates:
+
+- explicit revisions have 0% stale selection; natural temporal stale selection ≤5%;
+- held-out unanswerable false-positive rate ≤10% while retaining ≥90% answerable cases;
+- every context item has durable evidence and no raw/quarantined item enters a prompt;
+- profile output is permutation-invariant and each omission is explained;
+- LoCoMo regression is less than one point from R@10 0.709 and R@30 0.817;
+- restore reconstructs every head/evidence edge; multi-replica mutation, quota and audit chaos
+  passes.
+
+Every benchmark artifact records clean SHA, dirty flag, dataset hash, command, provider,
+embedder/model/dimensions, RRF/fusion settings, thresholds, reranker/extractor versions, and
+failure/fallback counters.
+
+### Deliberately deferred
+
+Do not build multimodal storage, a connector marketplace, a general knowledge graph, a
+separate vector database, autonomous generative profiles, learned truth resolution, complex
+episode consolidation, or distributed file storage before the P0/P1 invariants pass. These
+features broaden a system whose present failures are correctness failures; they do not fix
+them.
+
 ## 2026 north star
 
 This is a direction, not a claim that paper scores are comparable to our harness. Current

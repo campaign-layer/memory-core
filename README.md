@@ -59,9 +59,13 @@ before publishing; the outputs are copied from that session, not written by hand
 ```bash
 git clone https://github.com/campaign-layer/memory-core
 cd memory-core
-npm install
-npm run dev              # tsx src/server.ts, listens on 0.0.0.0:7401
+npm ci
+HOST=127.0.0.1 npm run dev   # development-only, loopback:7401
 ```
+
+This minimal walkthrough has no API key and is safe only on loopback. For persistent storage
+and distinct principal keys for Claude, Codex, and Hermes, use the
+[local self-hosting guide](docs/deployment.md#local-self-hosting).
 
 ```bash
 curl -s localhost:7401/health
@@ -108,7 +112,7 @@ Turn on semantic retrieval. `MEMORY_EMBEDDER=local` downloads a ~35 MB ONNX mode
 then runs offline; `hash` is deterministic and needs no download.
 
 ```bash
-MEMORY_EMBEDDER=local npm run dev
+HOST=127.0.0.1 MEMORY_EMBEDDER=local npm run dev
 curl -s localhost:7401/ready
 # ..."provider":{"ok":true,"provider":"in-memory"}...
 ```
@@ -469,16 +473,18 @@ unrelated keys, so unknown names cannot be rejected; validate the deployment man
 | `MEMORY_RERANKER_MIN_SCORE` | `0` | final cross-encoder relevance gate, 0–1; calibrate on a development split |
 | `MEMORY_EXTRACTOR` | `none` | `none` (passthrough — stores each observation verbatim) \| `llm` |
 | `MEMORY_EXTRACTOR_BASE_URL` | `https://api.openai.com/v1` | any OpenAI-compatible chat endpoint |
-| `MEMORY_EXTRACTOR_API_KEY` | unset | key for the above |
+| `MEMORY_EXTRACTOR_API_KEY` | unset | key for the above; falls back to `OPENAI_API_KEY` |
 | `MEMORY_EXTRACTOR_MODEL` | `gpt-4o-mini` | extraction model |
 | `MEMORY_EXTRACTOR_BATCH_SIZE` | unset | turns per extraction call, 1–200 |
 
 `VOYAGE_API_KEY` is read by the Voyage embedder and reranker; `OPENAI_API_KEY` is read by the
 OpenAI embedder.
 
-Reranking is service-level, so REST, MCP recall, and `buildContext` get the same order for
-every provider. It recalls `max(50, limit*5)` candidates capped at 100, sends only stored
-memory text to the cross-encoder, and uses the returned relevance score as the public score.
+Reranking is service-level, so REST, remote-mode MCP recall, and `buildContext` get the same
+order for every HTTP-service provider. Embedded MCP constructs its own basic provider and
+does not load the HTTP service's embedder, reranker, extractor, or Postgres configuration. The
+service recalls `max(50, limit*5)` candidates capped at 100, sends only stored memory text to
+the cross-encoder, and uses the returned relevance score as the public score.
 Each hosted attempt is capped at five seconds with no inline retry. An outage logs once,
 opens a 60-second cooldown, and falls back to the provider's exact prior ranking. Default
 `none` makes no hosted call and preserves existing behavior.
@@ -588,7 +594,7 @@ benchmark number: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ```bash
 docker build -t memory-core .
-docker run -p 7401:7401 memory-core
+docker run -p 127.0.0.1:7401:7401 memory-core
 
 # opt in to the larger native local-ONNX dependency tree
 docker build \
@@ -596,7 +602,7 @@ docker build \
   -t memory-core-local-onnx .
 
 # with file persistence
-docker run -p 7401:7401 \
+docker run -p 127.0.0.1:7401:7401 \
   -e MEMORY_PROVIDER=file \
   -e MEMORY_FILE_PATH=/app/data/memory-core.json \
   -v "$(pwd)/data:/app/data" \
@@ -640,14 +646,16 @@ Deployment guidance, docker-compose, Kubernetes and the operational limits:
 
 ## Docs
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — what is structurally wrong with the current
-  design and the target shape. **Start here.**
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the verified gap register and transactional
+  evidence/version/current-head target architecture. **Start here.**
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) — every harness, metric definitions, full results.
 - [`bench/README.md`](bench/README.md) — synthetic dataset design and label integrity.
 - [`docs/providers.md`](docs/providers.md) — provider internals and scoring formulas.
 - [`docs/WORKING_OVERVIEW.md`](docs/WORKING_OVERVIEW.md) — the write path and the read path.
-- [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) — integrating from an application.
-- [`docs/deployment.md`](docs/deployment.md) — running it, and the limits before you do.
+- [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) — application integration plus
+  local Claude, Codex, and Hermes connections.
+- [`docs/deployment.md`](docs/deployment.md) — secure local self-hosting and the limits before
+  production deployment.
 - [`src/integrations/README.md`](src/integrations/README.md) — MCP and agent frameworks.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — tests, benchmarks, adding a provider.
 

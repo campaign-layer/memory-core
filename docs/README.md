@@ -6,8 +6,8 @@ and the headline numbers.
 ## Read in this order
 
 1. **[ARCHITECTURE.md](./ARCHITECTURE.md)** — what is structurally wrong with the current
-   design, what the benchmarks changed about the plan, and the target shape. This is the
-   strategic document; everything else is downstream of it.
+   design, the verified production gap register, and the evidence-ledger/current-head target
+   shape. This is the strategic document; everything else is downstream of it.
 2. **[BENCHMARKS.md](./BENCHMARKS.md)** — every harness, every metric definition, full
    results for the synthetic suite, LongMemEval and LoCoMo. Read the caveats before quoting
    anything: all of it is our harness, none of it is comparable to a published leaderboard,
@@ -16,9 +16,10 @@ and the headline numbers.
    and the read path.
 4. **[providers.md](./providers.md)** — every backend, its scoring formula, and its measured
    quality.
-5. **[INTEGRATION_GUIDE.md](./INTEGRATION_GUIDE.md)** — integrating from an application.
-6. **[deployment.md](./deployment.md)** — configuration, the operational gap list, Docker,
-   Kubernetes, troubleshooting.
+5. **[INTEGRATION_GUIDE.md](./INTEGRATION_GUIDE.md)** — integrating from an application and
+   connecting Claude, Codex, and Hermes to one local shared service.
+6. **[deployment.md](./deployment.md)** — secure local self-hosting, configuration, the
+   operational gap list, Docker, Kubernetes, and troubleshooting.
 
 Outside this directory:
 

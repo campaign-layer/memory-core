@@ -31,6 +31,10 @@ jobs:
 
       - run: npm run build
 
+      - name: Verify the embedded MCP lifecycle and restart persistence
+        if: matrix.node == '22'
+        run: npm run verify:mcp
+
       - name: Assert generated integration schemas are current
         if: matrix.node == '22'
         run: |

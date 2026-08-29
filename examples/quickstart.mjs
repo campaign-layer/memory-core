@@ -1,17 +1,18 @@
 /**
  * End-to-end walkthrough of the memory-core HTTP API.
  *
- * No dependencies — uses Node 18+ global fetch.
+ * No dependencies — uses the project's Node 20+ runtime.
  *
  *   npm run dev                      # terminal 1
  *   node examples/quickstart.mjs     # terminal 2
  *
- * Point it elsewhere with MEMORY_CORE_URL, and add auth with MEMORY_CORE_API_KEY
- * if the target server sets MEMORY_CORE_API_KEYS.
+ * Point it elsewhere with MEMORY_CORE_URL. Set MEMORY_CORE_API_KEY for the
+ * quickstart principal and MEMORY_CORE_OPERATOR_API_KEY for compaction.
  */
 
 const BASE = process.env.MEMORY_CORE_URL ?? "http://localhost:7401";
 const API_KEY = process.env.MEMORY_CORE_API_KEY;
+const OPERATOR_API_KEY = process.env.MEMORY_CORE_OPERATOR_API_KEY;
 
 const IDENTITY = {
   tenantId: "demo",
@@ -19,12 +20,12 @@ const IDENTITY = {
   actorId: "user_42",
 };
 
-async function call(method, path, body) {
+async function call(method, path, body, apiKey = API_KEY) {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: {
       ...(body ? { "content-type": "application/json" } : {}),
-      ...(API_KEY ? { "x-api-key": API_KEY } : {}),
+      ...(apiKey ? { "x-api-key": apiKey } : {}),
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
@@ -48,7 +49,7 @@ function step(n, label) {
 async function main() {
   step(1, "Check the service is up");
   const ready = await call("GET", "/ready");
-  console.log(`   provider=${ready.provider.provider} detail=${ready.provider.detail}`);
+  console.log(`   provider=${ready.provider.provider}`);
 
   step(2, "Ingest a few memories");
   // memory-core does NOT extract: every observation must already be an atomic,
@@ -125,6 +126,7 @@ async function main() {
       signal: "positive",
       tenantId: IDENTITY.tenantId,
       appId: IDENTITY.appId,
+      actorId: IDENTITY.actorId,
     });
     console.log(`   updated=${feedback.updated} for ${top.id}`);
   }
@@ -143,9 +145,12 @@ async function main() {
   );
 
   step(8, "Archive decay-expired records");
-  const compact = await call("POST", "/v1/memory/compact");
-  // archivedSuperseded is always 0: nothing on the write path sets that status.
-  console.log(`   ${JSON.stringify(compact)}`);
+  if (API_KEY && !OPERATOR_API_KEY) {
+    console.log("   skipped: authenticated compaction requires MEMORY_CORE_OPERATOR_API_KEY");
+  } else {
+    const compact = await call("POST", "/v1/memory/compact", undefined, OPERATOR_API_KEY);
+    console.log(`   ${JSON.stringify(compact)}`);
+  }
 
   step(9, "The lexical blind spot, on purpose");
   // "where should we eat tonight" shares no terms with "Prefers vegetarian Italian
@@ -158,10 +163,10 @@ async function main() {
     filters: IDENTITY,
     limit: 5,
   });
-  console.log(`   hits=${semantic.count} (embedder=${ready.provider.detail.split("embedder=")[1] ?? "?"})`);
+  console.log(`   hits=${semantic.count} (the public readiness response intentionally omits embedder details)`);
   if (semantic.count === 0) {
     console.log("   No term overlap, so BM25-only returns nothing.");
-    console.log("   Retry with: MEMORY_EMBEDDER=local npm run dev");
+    console.log("   Retry the server with: HOST=127.0.0.1 MEMORY_EMBEDDER=local npm run dev");
   }
 
   console.log("\nDone.");
@@ -169,6 +174,6 @@ async function main() {
 
 main().catch((err) => {
   console.error(`\nFailed: ${err.message}`);
-  console.error(`Is memory-core running at ${BASE}? Start it with: npm run dev`);
+  console.error(`Is memory-core running at ${BASE}? Start it with: HOST=127.0.0.1 npm run dev`);
   process.exit(1);
 });

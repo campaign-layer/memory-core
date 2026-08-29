@@ -269,3 +269,86 @@ multi-replica load, distributed quota, and durable audit evidence are still exte
   stale-over-current and abstention leakage numbers explicitly block production-quality and
   SOTA claims.
 - Audit or replace the optional ONNX dependency chain before enabling it in a release image.
+
+## Run: 2026-08-29 16:24 (IST)
+
+### Scope
+
+Turn the verified security, atomicity, provenance, temporal-quality, profile, migration, and
+operations gaps into one production architecture proposal; document a safe local shared
+service; and provide accurate Claude, Codex, and Hermes connection paths. The pass also fixes
+the executable quickstart and adds the existing MCP lifecycle verifier to CI.
+
+### Changes
+
+- Added a complete prioritized gap register and a proposed relational architecture built on
+  immutable evidence, append-only versions, one transactional current head, persisted
+  idempotency, bounded/rebuildable relations, explicit answerable/abstain/conflict decisions,
+  and deterministic structured profiles.
+- Defined the target fail-closed startup and SDK transport contracts, atomic batch/revision
+  APIs, extraction quarantine boundary, expand/backfill/cutover migration, release tests,
+  quantitative quality gates, and deliberately deferred feature set.
+- Added a secure local self-hosting topology: one loopback HTTP service is the sole file
+  writer, while Claude, Codex, and Hermes use distinct principal credentials and local stdio
+  MCP proxies to share one tenant/space/actor.
+- Added built-JavaScript connection commands for Claude Code, Codex CLI/app, and Hermes, plus
+  embedded-mode limitations and an explicit warning that the REST port is not an HTTP MCP
+  endpoint.
+- Corrected stale package imports and lifecycle claims. Root package imports now match the
+  actual export map; current remote `/get` and `/status` behavior is documented; embedded MCP
+  no longer inherits service embedder/reranker/extractor/Postgres claims.
+- Fixed `examples/quickstart.mjs` for the minimal readiness response, complete feedback
+  identity, operator-only compaction, and current Node/runtime guidance.
+- Added `npm run verify:mcp` to the Node 22 CI lane.
+
+### How It Works Now
+
+1. Build the checkout and run one memory-core HTTP process on `127.0.0.1` with file or
+   Postgres persistence and one exact principal grant per agent app.
+2. Claude, Codex, and Hermes each launch the compiled MCP server over stdio in remote mode.
+   The proxy pins identity from its environment and calls the shared REST service with its
+   own key.
+3. Same tenant/space/actor plus different app ids shares actor-scoped memories while retaining
+   producer provenance; app and thread scopes remain narrower.
+4. The architecture document describes the proposed V2 mutation/truth model. That model is
+   not implemented by this documentation pass; current remote supersede remains non-atomic.
+
+### Files Touched
+
+- `.github/workflows/ci.yml` — gate the embedded MCP lifecycle and restart verifier.
+- `README.md` — loopback quickstart, local self-host links, and correct embedded/remote claims.
+- `docs/ARCHITECTURE.md` — verified gap register and proposed production V2 architecture.
+- `docs/INTEGRATION_GUIDE.md` — local Claude, Codex, and Hermes connection walkthrough.
+- `docs/deployment.md` — safe local topology, identity grants, storage and security limits.
+- `docs/README.md` — updated documentation map.
+- `src/integrations/README.md` — built stdio commands, Codex setup, correct imports/lifecycle.
+- `examples/quickstart.mjs` — executable readiness/auth/feedback/compaction walkthrough.
+- `docs/CODEX_RUN_SUMMARY.md` — this handoff entry.
+
+### Validation
+
+- Node 20 TypeScript typecheck and build passed.
+- Node 20 unit/integration suite: 171 outcomes, 170 passed, one opt-in ONNX test skipped, zero
+  failed.
+- MCP end to end passed all six tools, file restart persistence, supersede, forget, and clean
+  shutdown; the compiled MCP entry point starts with the documented identity variables.
+- Updated HTTP quickstart passed end to end against a short-lived loopback service and the
+  service shut down cleanly.
+- Hermes Python contract tests passed 4/4; `node --check examples/quickstart.mjs` and
+  `git diff --check` passed.
+- Codex stdio syntax was checked against the installed Codex CLI and official OpenAI MCP
+  documentation. Claude and Hermes shapes were checked against their official documentation.
+
+### Risks / Follow-ups
+
+- A new local Kimi collaboration was attempted with the full gap list, but `kimi-code/k3`
+  returned HTTP 403 for its five-hour usage quota before any dialogue. No Kimi architecture
+  agreement or sign-off is claimed. The previous partial Kimi findings were independently
+  reproduced; this ADR remains ready for a verbatim Kimi challenge after quota reset.
+- The target evidence/version/current-head model is a proposal, not shipped behavior. The P1
+  insecure default listener/SDK redirect findings and P2 ingestion/extraction/revision gaps
+  remain open in code.
+- Generic MCP protocol behavior is locally verified, but this pass did not run a real Claude,
+  Codex, or Hermes host through the full shared-service scenario.
+- GitHub CI, Postgres migration/load, multi-replica chaos, backup/restore, distributed quota,
+  audit export, and held-out abstention/temporal targets remain release gates.

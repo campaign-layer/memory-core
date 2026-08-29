@@ -72,22 +72,94 @@ is repository-authored and is not a public benchmark or a SOTA comparison.
   force-closed after 10 seconds; provider close receives a further five-second bound, and a
   forced or failed close exits non-zero for the orchestrator to record.
 
-## Local
+## Local self-hosting
+
+There are two useful local topologies:
+
+- **One agent, embedded MCP:** the MCP subprocess owns an in-memory or file provider. This is
+  the shortest development path, but each MCP process is a separate service.
+- **Several agents, one shared service:** run one memory-core HTTP process and point one MCP
+  proxy per agent at it. This is the recommended topology for Claude, Codex, Hermes, or other
+  agents sharing actor/workspace memory.
+
+Do **not** point several embedded MCP processes at the same JSON file. The file provider is
+single-process and has no inter-process lock. For a local multi-agent setup, one file-backed
+HTTP service may safely be the sole writer; use Postgres for multiple service replicas or a
+production-shaped deployment.
+
+### Build a local checkout
+
+Node 20 or newer is required.
 
 ```bash
-npm install
-npm run dev            # tsx src/server.ts, hot reload, 0.0.0.0:7401
+npm ci
+npm run build
 ```
 
-## Built
+For edit/reload development, `npm run dev` runs `tsx src/server.ts`. For a durable local
+service, run the built JavaScript with `npm start`.
+
+### Start one private service for Claude, Codex, and Hermes
+
+Create the parent directory for `MEMORY_FILE_PATH`, then start exactly one process. Replace
+the example keys before use:
 
 ```bash
-npm run build          # tsc -> dist/
-npm start              # node dist/server.js
+export MEMORY_CORE_PRINCIPAL_API_KEYS='[
+  {"key":"replace-claude-key","tenantId":"local","spaceId":"madhav-personal","appId":"claude","actorId":"madhav"},
+  {"key":"replace-codex-key","tenantId":"local","spaceId":"madhav-personal","appId":"codex","actorId":"madhav"},
+  {"key":"replace-hermes-key","tenantId":"local","spaceId":"madhav-personal","appId":"hermes","actorId":"madhav"}
+]'
+
+HOST=127.0.0.1 \
+MEMORY_PROVIDER=file \
+MEMORY_FILE_PATH=/absolute/path/to/memory-core-data/store.json \
+npm start
 ```
 
-`npm run build` compiles `src/**` (tests included — `tsconfig.json` has no test exclusion, so
-`dist/` contains `*.test.js`; they are never imported by the server).
+The three grants intentionally share tenant, space, and actor while keeping distinct app ids
+for provenance. Actor-scoped records can therefore follow the same person across agents;
+app-scoped records remain with their producer. Use different actors or spaces when memories
+must not cross that boundary.
+
+Check the process before connecting an agent:
+
+```bash
+curl -s http://127.0.0.1:7401/ready
+# {"ok":true,"service":"memory-core","provider":{"ok":true,"provider":"file"},...}
+```
+
+Then configure each agent as a **remote-mode stdio MCP proxy** using its own principal key.
+The exact Claude, Codex, and Hermes configurations are in
+[`INTEGRATION_GUIDE.md`](./INTEGRATION_GUIDE.md#connect-local-agents-to-the-shared-service).
+
+### Current security boundary
+
+The current binary defaults to `HOST=0.0.0.0` and disables HTTP authentication when all key
+settings are empty. Until the fail-closed startup contract in
+[`ARCHITECTURE.md`](./ARCHITECTURE.md#reviewed-production-target-2026-08-29) is implemented:
+
+- bind local installs explicitly to `127.0.0.1`;
+- configure principal keys even on a laptop;
+- never publish port 7401 directly to an untrusted network;
+- terminate TLS and enforce network policy at a trusted proxy for non-loopback access;
+- use a fixed, non-redirecting `MEMORY_CORE_URL`, because the current SDK does not yet reject
+  redirects or impose a whole-request deadline.
+
+This is a safe local operating recipe, not a production-readiness claim.
+
+### Local Postgres instead of a JSON file
+
+Use the [docker-compose example](#docker-compose) when you want Postgres + pgvector locally.
+Postgres is the only supported backend for more than one memory-core replica. For a
+production-shaped installation, run migrations as a separate job, keep
+`MEMORY_PG_AUTO_MIGRATE=false` on application replicas, and complete the backup/restore and
+multi-replica gates listed above.
+
+### Build output
+
+`npm run build` compiles `src/**` to `dist/`. Tests are compiled too because `tsconfig.json`
+does not exclude them, but the server never imports them and package artifacts exclude them.
 
 ## Configuration
 
@@ -117,7 +189,7 @@ and use `/ready` to confirm the selected provider kind.
 | `MEMORY_RERANKER_MIN_SCORE` | `0` | Final cross-encoder score gate in 0–1. Calibrate before raising. |
 | `MEMORY_EXTRACTOR` | `none` | `none` (passthrough) \| `llm`. `none` keeps the write path byte-identical to pre-extraction behaviour. |
 | `MEMORY_EXTRACTOR_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible chat endpoint. |
-| `MEMORY_EXTRACTOR_API_KEY` | unset | Key for the above. |
+| `MEMORY_EXTRACTOR_API_KEY` | unset | Key for the above; the LLM extractor falls back to `OPENAI_API_KEY`. |
 | `MEMORY_EXTRACTOR_MODEL` | `gpt-4o-mini` | Extraction model. |
 | `MEMORY_EXTRACTOR_BATCH_SIZE` | unset | Turns per extraction call. Integer 1–200 or startup throws. |
 
@@ -150,7 +222,7 @@ measured with.
 
 ```bash
 docker build -t memory-core .
-docker run -p 7401:7401 memory-core
+docker run -p 127.0.0.1:7401:7401 memory-core
 
 # Optional local ONNX image. Do not release while its dependency audit is red.
 docker build \
@@ -158,14 +230,14 @@ docker build \
   -t memory-core-local-onnx .
 
 # file persistence (the image pre-creates /app/data owned by the node user)
-docker run -p 7401:7401 \
+docker run -p 127.0.0.1:7401:7401 \
   -e MEMORY_PROVIDER=file \
   -e MEMORY_FILE_PATH=/app/data/memory-core.json \
   -v "$(pwd)/data:/app/data" \
   memory-core
 
 # postgres
-docker run -p 7401:7401 \
+docker run -p 127.0.0.1:7401:7401 \
   -e MEMORY_PROVIDER=postgres \
   -e MEMORY_PG_URL='postgres://user:pw@host:5432/memory_core' \
   -e MEMORY_PG_AUTO_MIGRATE=true \
@@ -210,7 +282,7 @@ CI now builds the default image without optional ONNX packages and boots that im
 services:
   memory-core:
     build: .
-    ports: ["7401:7401"]
+    ports: ["127.0.0.1:7401:7401"]
     environment:
       MEMORY_PROVIDER: postgres
       MEMORY_PG_URL: postgres://memory:memory@db:5432/memory_core
@@ -374,7 +446,6 @@ There is no export or import route.
 | `Invalid enum value` at startup | `MEMORY_PROVIDER` is not one of the five kinds. |
 | `Invalid PORT value` / `Invalid MEMORY_RATE_LIMIT_PER_MIN value` | Out of range. Rate limit must be 10–10000. |
 | Env var seems ignored | zod strips unknown keys. Only the variables in the table above are read. |
-| `filePath is required when MEMORY_PROVIDER=file` | `MEMORY_FILE_PATH` unset and no default resolved. |
 | 401 on `/v1/*` | Authentication is enabled and the presented key is missing or unknown. |
 | 403 on `/v1/*` | The key is valid but the requested principal exceeds its grant, or a non-operator attempted global compaction. |
 | 429 | Rate limit. Check `Retry-After`. Remember it is per process. |
