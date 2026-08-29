@@ -8,6 +8,7 @@ import {
   type JsonSchemaNode,
   type MemoryToolContext,
 } from "../tools.js";
+import { frameUntrustedMemory } from "./prompt-memory.js";
 
 // OpenAI-compatible wiring. Structurally typed against the `openai` package so
 // memory-core does not depend on it - pass your own `new OpenAI()` instance.
@@ -99,7 +100,10 @@ export async function runOpenAITurn(
     if (context.ok) contextInjected = context.text;
   }
 
-  const systemParts = [options.system, contextInjected ? `Known memory:\n${contextInjected}` : ""]
+  const systemParts = [
+    options.system,
+    contextInjected ? frameUntrustedMemory(contextInjected) : "",
+  ]
     .filter((part): part is string => Boolean(part && part.trim()));
 
   const messages: Array<Record<string, unknown>> = [];

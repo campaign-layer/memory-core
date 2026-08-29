@@ -18,6 +18,7 @@ export type MemoryScope =
   | "tenant";
 
 export type MemoryStatus = "active" | "superseded" | "archived";
+export type MemoryRetirementStatus = Exclude<MemoryStatus, "active">;
 
 export type DecayKind = "none" | "time" | "inactivity";
 
@@ -43,6 +44,14 @@ export interface MemoryFeedbackStats {
 export interface MemoryRecord {
   id: string;
   tenantId: string;
+  /**
+   * Authorized sharing boundary inside a tenant. Unlike appId, this remains
+   * stable when the same actor moves between Codex, Hermes, OpenClaw, or another
+   * producer. Personal callers default it to actorId; teams should set an
+   * explicit workspace id.
+   */
+  spaceId: string;
+  /** Producer application. This is provenance, not the general read boundary. */
   appId: string;
   actorId: string;
   threadId?: string | null;
@@ -65,6 +74,8 @@ export interface MemoryRecord {
 
 export interface MemoryObservation {
   tenantId: string;
+  /** Defaults to actorId for a personal cross-agent memory space. */
+  spaceId?: string;
   appId: string;
   actorId: string;
   threadId?: string | null;
@@ -92,8 +103,13 @@ export interface MemoryIngestResponse {
 
 export interface MemoryFilters {
   tenantId: string;
+  /** Defaults to actorId, then appId for legacy app-wide callers. */
+  spaceId?: string;
   appId: string;
   actorId?: string;
+  /** Current caller thread for thread-scope visibility; does not filter broader memories. */
+  accessThreadId?: string;
+  /** Optional source-thread constraint retained for direct search callers. */
   threadId?: string;
   memoryTypes?: MemoryType[];
   scope?: MemoryScope[];
@@ -104,14 +120,20 @@ export interface MemorySearchQuery {
   query: string;
   filters: MemoryFilters;
   limit?: number;
+  /** Minimum first-stage provider score. */
   minScore?: number;
+  /** Optional independent cross-encoder score threshold. */
+  rerankerMinScore?: number;
 }
 
 export interface MemorySearchRequest {
   query: string;
   filters: MemoryFilters;
   limit?: number;
+  /** Minimum first-stage provider score. */
   minScore?: number;
+  /** Optional independent cross-encoder score threshold. */
+  rerankerMinScore?: number;
 }
 
 export interface MemorySearchResponse {
@@ -137,12 +159,21 @@ export interface ContextBuildRequest {
 
 export interface ContextBuildResult {
   profileSummary: string;
+  /** Profile records actually emitted in contextText. Added without changing the
+   *  legacy profileSummary field, so every prompt line can be traced to an id. */
+  profileMemories?: Array<{
+    id: string;
+    memoryType: MemoryType;
+    text: string;
+    provenance: ContextMemoryProvenance;
+  }>;
   selectedMemories: Array<{
     id: string;
     memoryType: MemoryType;
     text: string;
     score: number;
     reasons: string[];
+    provenance?: ContextMemoryProvenance;
   }>;
   contextText: string;
   totalMemories: number;
@@ -150,14 +181,29 @@ export interface ContextBuildResult {
   actorProfile?: string;
 }
 
+export interface ContextMemoryProvenance {
+  observedAt: string;
+  lastSeenAt: string;
+  sourceType: string;
+  sourceId?: string | null;
+  sourceSessionId?: string | null;
+}
+
 export interface MemoryFeedbackInput {
   memoryId: string;
   signal: "selected" | "positive" | "negative";
   /** Tenant scope for the target memory. Optional for backward compatibility;
    *  providers that support it restrict the update to this scope, and the HTTP
-   *  feedback route requires both so no caller can reach another tenant's row. */
+   *  feedback route requires a complete caller identity. */
   tenantId?: string;
+  /** Preferred id-addressed sharing boundary; defaults to actorId when present. */
+  spaceId?: string;
+  /** Legacy producer boundary, used only when spaceId is absent. */
   appId?: string;
+  /** Caller actor for scope-aware id authorization. */
+  actorId?: string;
+  /** Caller thread for scope-aware id authorization. */
+  accessThreadId?: string;
 }
 
 export interface MemoryCompactResult {

@@ -1,0 +1,58 @@
+{
+  "review_date": "2026-08-29",
+  "snapshot": {
+    "root": "/private/tmp/memory-core-claude-opus-delta-aiVQBr/source",
+    "file_count": 169,
+    "manifest_file": "source-manifest.sha256",
+    "manifest_sha256": "503ec3511b0cfeefe2e222eba83dba118320dc648ea20dd26f60675a219c7abc"
+  },
+  "runner": {
+    "package": "@anthropic-ai/claude-code",
+    "version": "2.1.251",
+    "requested_model": "opus",
+    "actual_primary_model": "claude-opus-5",
+    "auxiliary_model_reported": "claude-haiku-4-5",
+    "effort": "max",
+    "permission_mode": "plan",
+    "tools_allowed": [
+      "Read",
+      "Glob",
+      "Grep"
+    ],
+    "tools_denied": [
+      "Bash",
+      "Edit",
+      "Write",
+      "WebFetch",
+      "WebSearch",
+      "Task"
+    ],
+    "network_and_mcp_disabled": true,
+    "no_session_persistence": true
+  },
+  "prompt_file": "review.prompt.md",
+  "prompt_sha256": "27dc7cf079f0145c4f1d6427e62fad0c93b8bbdda9bd1f9351a2e4dff18cd3e7",
+  "primary_run": {
+    "session_id": "c82435f4-723b-4111-8a1e-2a3f6d10ca92",
+    "duration_api_ms": 546059,
+    "duration_ms": 547319,
+    "cost_usd": 5.850373500000001,
+    "turns": 62,
+    "terminal_reason": "completed",
+    "verdict": "ADVISORY",
+    "blockers": [],
+    "explicitly_verified_fixed": [
+      "REL-001-ready-never-ready-fresh-pg",
+      "REL-002-checksummed-migrations-claim-unimplemented"
+    ]
+  },
+  "capture_integrity": {
+    "primary_raw_available": false,
+    "reason": "The completed outer JSON was returned through the command transport, but the final read used a 2,000-token display cap and the process session closed before the full 6,569-token chunk could be persisted. The missing bytes are not reconstructed.",
+    "replay": "The run used --no-session-persistence, so its session id could not be resumed.",
+    "capture_retry_file": "capture-retry.raw.json",
+    "capture_retry_sha256": "a167ebd9fdb704f53398e8a03dd08780f87b656e214772a90375f9225084a4e0",
+    "capture_retry_result": "Claude API 429 session limit; no review content generated."
+  },
+  "disposition": "The completed focused review found no P0/P1/P2 blocker and returned ADVISORY. Raw-capture loss is disclosed as an evidence limitation, not silently repaired."
+}

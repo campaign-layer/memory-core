@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { after, test } from "node:test";
 import pg from "pg";
 import {
@@ -69,6 +72,11 @@ async function preflight(): Promise<Preflight> {
       "SELECT extversion FROM pg_extension WHERE extname = 'vector'",
     );
     const vectorVersion = extension.rows[0]?.extversion;
+    if (vectorVersion) {
+      // Provision fixture dimensions in the explicit test/deploy phase. Search
+      // and ingest are intentionally forbidden from running DDL on demand.
+      await pool.query("SELECT memory_core_ensure_embedding_dim(8)");
+    }
     return {
       url,
       vectorVersion,
@@ -149,6 +157,7 @@ function record(overrides: Partial<MemoryRecord> & { tenantId: string; text: str
     updatedAt: now,
     stats: { selectedCount: 0, positiveCount: 0, negativeCount: 0 },
     ...overrides,
+    spaceId: overrides.spaceId ?? overrides.actorId ?? "actor_1",
   };
 }
 
@@ -170,12 +179,75 @@ after(async () => {
   }
 });
 
-test("health reports connectivity, server version and row counts", { skip }, async () => {
+test("health rejects a reachable but pre-space schema", async () => {
+  const fakePool = {
+    on() {},
+    async query() {
+      return {
+        rowCount: 1,
+        rows: [{
+          server_version: "16.4",
+          vector_version: null,
+          memory_table: "memories",
+          memory_space_column: false,
+          estimated_rows: "12",
+          embedding_table: null,
+          embedding_space_column: false,
+        }],
+      };
+    },
+  };
+  const schemaProbe = new PostgresMemoryProvider({ pool: fakePool as never });
+  const status = await schemaProbe.health();
+  assert.equal(status.ok, false);
+  assert.match(status.detail ?? "", /apply migration 002_memory_spaces/);
+});
+
+test("health reports connectivity, server version and constant-cost row estimates", { skip }, async () => {
   const status = await provider!.health();
   assert.equal(status.ok, true);
   assert.equal(status.provider, "postgres");
   assert.match(status.detail ?? "", /pg=\d+/);
-  assert.match(status.detail ?? "", /rows=\d+/);
+  // reltuples is -1 until a freshly created relation has been analyzed.
+  assert.match(status.detail ?? "", /rows_estimate=-?\d+/);
+});
+
+test("migration ledger records ordered schema versions and source checksums", { skip }, async () => {
+  const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+  try {
+    const versions = await pool.query<{ version: string; checksum: string | null }>(
+      "SELECT version, checksum FROM memory_core_migrations WHERE version LIKE '00%' ORDER BY version",
+    );
+    assert.deepEqual(versions.rows.map((row) => row.version), ["001_init", "002_memory_spaces"]);
+    for (const row of versions.rows) assert.match(row.checksum ?? "", /^[a-f0-9]{64}$/);
+  } finally {
+    await pool.end();
+  }
+});
+
+test("migration ledger rejects an edited applied migration", { skip }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "memory-core-migration-test-"));
+  const migrationFile = path.join(dir, `checksum_probe_${RUN}.sql`);
+  const version = path.basename(migrationFile, ".sql");
+  const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+  try {
+    await writeFile(migrationFile, "SELECT 1;\n", "utf8");
+    const first = new PostgresMemoryProvider({ connectionString: env.url, migrationFile });
+    await first.migrate();
+    await first.close();
+
+    await writeFile(migrationFile, "SELECT 2;\n", "utf8");
+    const changed = new PostgresMemoryProvider({ connectionString: env.url, migrationFile });
+    try {
+      await assert.rejects(() => changed.migrate(), /checksum mismatch.*never edit an applied migration/);
+    } finally {
+      await changed.close();
+    }
+  } finally {
+    await pool.query("DELETE FROM memory_core_migrations WHERE version = $1", [version]);
+    await pool.end();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("fails closed when tenant or app scope is missing", { skip }, async () => {
@@ -212,7 +284,7 @@ test("ingest round-trips a record through getById", { skip }, async () => {
   const [saved] = await provider!.ingest([input]);
   assert.equal(saved.id, input.id);
 
-  const fetched = await provider!.getById(input.id, { tenantId: t, appId: APP });
+  const fetched = await provider!.getById(input.id, { tenantId: t, appId: APP, actorId: "actor_1", accessThreadId: "thread_7" });
   assert.ok(fetched);
   assert.equal(fetched.text, input.text);
   assert.equal(fetched.summary, input.summary);
@@ -270,7 +342,16 @@ test("findDuplicate is case- and whitespace-insensitive and scope-aware", { skip
   assert.equal(await provider!.findDuplicate(record({ ...noisy, actorId: "other_actor" })), null);
   assert.equal(await provider!.findDuplicate(record({ ...noisy, memoryType: "preference" })), null);
   assert.equal(await provider!.findDuplicate(record({ ...noisy, tenantId: tenant("dedup_other") })), null);
-  assert.equal(await provider!.findDuplicate(record({ ...noisy, appId: "app_other" })), null);
+  assert.equal(
+    (await provider!.findDuplicate(record({ ...noisy, appId: "app_other" })))?.id,
+    original.id,
+    "actor memory dedupes across producer apps inside one space",
+  );
+  assert.equal(
+    await provider!.findDuplicate(record({ ...noisy, scope: "app", appId: "app_other" })),
+    null,
+    "app-scoped identity still includes the producer app",
+  );
   assert.equal(await provider!.findDuplicate(record({ tenantId: t, text: "something else entirely" })), null);
 });
 
@@ -281,8 +362,8 @@ test("findDuplicate uses the dedup index rather than a table scan", { skip }, as
     // Enough rows that a sequential scan is genuinely the cheaper alternative,
     // so choosing the index is the planner's decision and not a small-table tie.
     await pool.query(
-      `INSERT INTO memories (id, tenant_id, app_id, actor_id, scope, memory_type, text, status)
-       SELECT 'plan_${RUN}_' || g, $1, $2, 'actor_plan', 'actor', 'fact', 'probe row ' || g, 'active'
+      `INSERT INTO memories (id, tenant_id, space_id, app_id, actor_id, scope, memory_type, text, status)
+       SELECT 'plan_${RUN}_' || g, $1, 'actor_plan', $2, 'actor_plan', 'actor', 'fact', 'probe row ' || g, 'active'
          FROM generate_series(1, 5000) g`,
       [t, APP],
     );
@@ -290,13 +371,14 @@ test("findDuplicate uses the dedup index rather than a table scan", { skip }, as
 
     const plan = await pool.query<{ "QUERY PLAN": string }>(
       `EXPLAIN SELECT id FROM memories m
-        WHERE m.tenant_id = $1 AND m.app_id = $2 AND m.actor_id = $3 AND m.memory_type = $4
+        WHERE m.tenant_id = $1 AND m.scope = 'actor' AND m.memory_type = $2
           AND m.status = 'active'
-          AND m.text_hash = md5(lower(regexp_replace(btrim($5::text), '\\s+', ' ', 'g')))`,
-      [t, APP, "actor_plan", "fact", "probe row 42"],
+          AND m.text_hash = md5(lower(regexp_replace(btrim($3::text), '\\s+', ' ', 'g')))
+          AND m.space_id = $4 AND m.actor_id = $5`,
+      [t, "fact", "probe row 42", "actor_plan", "actor_plan"],
     );
     const text = plan.rows.map((row) => row["QUERY PLAN"]).join("\n");
-    assert.match(text, /Index Scan using memories_dedup_idx/, `expected an index scan, got:\n${text}`);
+    assert.match(text, /Index Scan using memories_dedup_v2_idx/, `expected an index scan, got:\n${text}`);
     assert.match(text, /Index Cond:.*text_hash/, `text_hash should be an index condition, got:\n${text}`);
 
     const hit = await provider!.findDuplicate(
@@ -311,7 +393,8 @@ test("findDuplicate uses the dedup index rather than a table scan", { skip }, as
 
 test("search respects every MemoryFilters field", { skip }, async () => {
   const t = tenant("filters");
-  const base = { tenantId: t, text: "quarterly infrastructure planning notes" };
+  const spaceId = "platform-team";
+  const base = { tenantId: t, spaceId, text: "quarterly infrastructure planning notes" };
 
   const actorA = record({ ...base, actorId: "actor_a", metadata: { region: "eu" } });
   const actorB = record({ ...base, actorId: "actor_b", metadata: { region: "us" } });
@@ -322,15 +405,16 @@ test("search respects every MemoryFilters field", { skip }, async () => {
 
   const all = await provider!.search({
     query: "quarterly infrastructure planning",
-    filters: { tenantId: t, appId: APP },
+    filters: { tenantId: t, spaceId, appId: APP, actorId: "actor_a", accessThreadId: "thread_x" },
     limit: 50,
     minScore: 0,
   });
-  assert.equal(all.length, 5);
+  assert.equal(all.length, 4);
+  assert.ok(!ids(all).includes(actorB.id), "actor A must not see actor B's private memory");
 
   const byActor = await provider!.search({
     query: "quarterly infrastructure planning",
-    filters: { tenantId: t, appId: APP, actorId: "actor_b" },
+    filters: { tenantId: t, spaceId, appId: APP, actorId: "actor_b", scope: ["actor"] },
     limit: 50,
     minScore: 0,
   });
@@ -338,7 +422,7 @@ test("search respects every MemoryFilters field", { skip }, async () => {
 
   const byThread = await provider!.search({
     query: "quarterly infrastructure planning",
-    filters: { tenantId: t, appId: APP, threadId: "thread_x" },
+    filters: { tenantId: t, spaceId, appId: APP, actorId: "actor_a", threadId: "thread_x" },
     limit: 50,
     minScore: 0,
   });
@@ -346,7 +430,7 @@ test("search respects every MemoryFilters field", { skip }, async () => {
 
   const byType = await provider!.search({
     query: "quarterly infrastructure planning",
-    filters: { tenantId: t, appId: APP, memoryTypes: ["preference"] },
+    filters: { tenantId: t, spaceId, appId: APP, actorId: "actor_a", memoryTypes: ["preference"] },
     limit: 50,
     minScore: 0,
   });
@@ -354,7 +438,7 @@ test("search respects every MemoryFilters field", { skip }, async () => {
 
   const byScope = await provider!.search({
     query: "quarterly infrastructure planning",
-    filters: { tenantId: t, appId: APP, scope: ["workspace"] },
+    filters: { tenantId: t, spaceId, appId: APP, scope: ["workspace"] },
     limit: 50,
     minScore: 0,
   });
@@ -362,7 +446,7 @@ test("search respects every MemoryFilters field", { skip }, async () => {
 
   const byMetadata = await provider!.search({
     query: "quarterly infrastructure planning",
-    filters: { tenantId: t, appId: APP, metadata: { region: "eu" } },
+    filters: { tenantId: t, spaceId, appId: APP, actorId: "actor_a", metadata: { region: "eu" } },
     limit: 50,
     minScore: 0,
   });
@@ -370,7 +454,15 @@ test("search respects every MemoryFilters field", { skip }, async () => {
 
   const combined = await provider!.search({
     query: "quarterly infrastructure planning",
-    filters: { tenantId: t, appId: APP, actorId: "actor_a", memoryTypes: ["fact"], scope: ["thread"] },
+    filters: {
+      tenantId: t,
+      spaceId,
+      appId: APP,
+      actorId: "actor_a",
+      accessThreadId: "thread_x",
+      memoryTypes: ["fact"],
+      scope: ["thread"],
+    },
     limit: 50,
     minScore: 0,
   });
@@ -378,7 +470,7 @@ test("search respects every MemoryFilters field", { skip }, async () => {
 
   const noMatch = await provider!.search({
     query: "quarterly infrastructure planning",
-    filters: { tenantId: t, appId: APP, metadata: { region: "apac" } },
+    filters: { tenantId: t, spaceId, appId: APP, actorId: "actor_a", metadata: { region: "apac" } },
     limit: 50,
     minScore: 0,
   });
@@ -397,7 +489,7 @@ test("full-text ranking orders by ts_rank_cd and explains itself", { skip }, asy
 
   const hits = await provider!.search({
     query: "failed cache migration retro",
-    filters: { tenantId: t, appId: APP },
+    filters: { tenantId: t, appId: APP, actorId: "actor_1" },
     limit: 10,
     minScore: 0,
   });
@@ -422,7 +514,7 @@ test("tenant A never sees tenant B rows on any read path", { skip }, async () =>
 
   const searched = await provider!.search({
     query: "identical wording stored tenants",
-    filters: { tenantId: a, appId: APP },
+    filters: { tenantId: a, appId: APP, actorId: "shared_actor" },
     limit: 50,
     minScore: 0,
   });
@@ -432,7 +524,7 @@ test("tenant A never sees tenant B rows on any read path", { skip }, async () =>
   const listed = await provider!.listByActor(a, APP, "shared_actor");
   assert.deepEqual(listed.map((row) => row.id), [rowA.id]);
 
-  const scoped = await provider!.getById(rowB.id, { tenantId: a, appId: APP });
+  const scoped = await provider!.getById(rowB.id, { tenantId: a, appId: APP, actorId: "shared_actor" });
   assert.equal(scoped, null, "scoped getById returned another tenant's row");
 
   const duplicate = await provider!.findDuplicate(record({ ...rowB, id: "candidate", tenantId: a }));
@@ -440,11 +532,11 @@ test("tenant A never sees tenant B rows on any read path", { skip }, async () =>
 
   const crossApp = await provider!.search({
     query: "identical wording stored tenants",
-    filters: { tenantId: a, appId: "app_other" },
+    filters: { tenantId: a, appId: "app_other", actorId: "shared_actor" },
     limit: 50,
     minScore: 0,
   });
-  assert.equal(crossApp.length, 0, "app scoping leaked rows from another app");
+  assert.deepEqual(ids(crossApp), [rowA.id], "actor memory should follow its actor across producer apps");
 });
 
 test("a cross-tenant id collision cannot transfer row ownership", { skip }, async () => {
@@ -457,55 +549,209 @@ test("a cross-tenant id collision cannot transfer row ownership", { skip }, asyn
   const attacker = record({ ...victim, tenantId: b, actorId: "attacker_actor", text: "tenant B benign note" });
   await assert.rejects(
     () => provider!.ingest([attacker]),
-    /already exists under a different tenant\/app scope/,
+    /already exists under a different ownership scope/,
     "a cross-tenant id collision must be refused, not applied",
   );
 
-  const stillMine = await provider!.getById(victim.id, { tenantId: a, appId: APP });
+  const stillMine = await provider!.getById(victim.id, { tenantId: a, appId: APP, actorId: "victim_actor" });
   assert.equal(stillMine?.tenantId, a, "the row was reassigned to another tenant");
   assert.equal(stillMine?.appId, APP);
   assert.equal(stillMine?.actorId, "victim_actor");
   assert.equal(stillMine?.text, victim.text, "the victim's content was overwritten");
   assert.deepEqual((await provider!.listByActor(a, APP, "victim_actor")).map((row) => row.id), [victim.id]);
   assert.equal((await provider!.listByActor(b, APP, "attacker_actor")).length, 0);
-  assert.equal(await provider!.getById(victim.id, { tenantId: b, appId: APP }), null);
+  assert.equal(await provider!.getById(victim.id, { tenantId: b, appId: APP, actorId: "attacker_actor" }), null);
 
-  // Same tenant, different app is just as much a takeover.
+  // Tenant and space alone are not ownership: an id cannot be repointed to a
+  // different actor inside the same shared boundary.
   await assert.rejects(
-    () => provider!.ingest([record({ ...victim, appId: "app_other", text: "cross-app takeover" })]),
-    /already exists under a different tenant\/app scope/,
+    () => provider!.ingest([{ ...victim, actorId: "other_actor", text: "same-space actor takeover" }]),
+    /already exists under a different ownership scope/,
+  );
+
+  // A different space in the same tenant is also a different trust boundary.
+  await assert.rejects(
+    () => provider!.ingest([record({ ...victim, spaceId: "other-space", text: "cross-space takeover" })]),
+    /already exists under a different ownership scope/,
   );
 
   // The batch is one transaction, so a blocked row takes its siblings down with
   // it rather than half-applying the write.
   const sibling = record({ tenantId: b, actorId: "attacker_actor", text: "sibling row inside the blocked batch" });
   await assert.rejects(() => provider!.ingest([sibling, attacker]), /already exists/);
-  assert.equal(await provider!.getById(sibling.id, { tenantId: b, appId: APP }), null);
+  assert.equal(await provider!.getById(sibling.id, { tenantId: b, appId: APP, actorId: "attacker_actor" }), null);
 });
 
-test("applyFeedback is scoped whenever the caller supplies tenant and app", { skip }, async () => {
+test("applyFeedback enforces tenant and app visibility for app-scoped memory", { skip }, async () => {
   const a = tenant("fbscope_a");
   const b = tenant("fbscope_b");
-  const row = record({ tenantId: a, text: "scoped feedback target row" });
+  const row = record({ tenantId: a, scope: "app", text: "scoped feedback target row" });
   await provider!.ingest([row]);
 
   assert.equal(
-    await provider!.applyFeedback({ memoryId: row.id, signal: "positive", tenantId: b, appId: APP }),
+    await provider!.applyFeedback({ memoryId: row.id, signal: "positive", tenantId: b, appId: APP, actorId: "actor_1" }),
     null,
     "a mismatched tenant read back another tenant's row",
   );
   assert.equal(
-    await provider!.applyFeedback({ memoryId: row.id, signal: "positive", tenantId: a, appId: "app_other" }),
+    await provider!.applyFeedback({ memoryId: row.id, signal: "positive", tenantId: a, appId: "app_other", actorId: "actor_1" }),
     null,
     "a mismatched app read back another app's row",
   );
 
-  const untouched = await provider!.getById(row.id, { tenantId: a, appId: APP });
+  const untouched = await provider!.getById(row.id, { tenantId: a, appId: APP, actorId: "actor_1" });
   assert.deepEqual(untouched?.stats, { selectedCount: 0, positiveCount: 0, negativeCount: 0 });
   assert.equal(new Date(untouched!.lastSeenAt).toISOString(), row.lastSeenAt, "a rejected signal still bumped the row");
 
-  const scoped = await provider!.applyFeedback({ memoryId: row.id, signal: "positive", tenantId: a, appId: APP });
+  const scoped = await provider!.applyFeedback({ memoryId: row.id, signal: "positive", tenantId: a, appId: APP, actorId: "actor_1" });
   assert.equal(scoped?.stats.positiveCount, 1);
+});
+
+test("applyFeedback cannot revive an inactivity-expired memory", { skip }, async () => {
+  const t = tenant("feedback_expired");
+  const row = record({
+    tenantId: t,
+    text: "expired feedback must not refresh this row",
+    decayPolicy: { kind: "inactivity", ttlDays: 1 },
+    lastSeenAt: daysAgo(5),
+  });
+  await provider!.ingest([row]);
+
+  const updated = await provider!.applyFeedback({
+    memoryId: row.id,
+    signal: "positive",
+    tenantId: t,
+    appId: APP,
+    actorId: row.actorId,
+  });
+  assert.equal(updated, null);
+
+  const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+  try {
+    const stored = await pool.query<{ last_seen_at: Date; stats: Record<string, number> }>(
+      "SELECT last_seen_at, stats FROM memories WHERE id = $1",
+      [row.id],
+    );
+    assert.equal(stored.rows[0]?.last_seen_at.toISOString(), row.lastSeenAt);
+    assert.equal(stored.rows[0]?.stats.positiveCount, 0);
+  } finally {
+    await pool.end();
+  }
+});
+
+test("id-addressed reads and feedback enforce actor and thread visibility inside a space", { skip }, async () => {
+  const t = tenant("idvisibility");
+  const shared = { tenantId: t, spaceId: "platform-team", appId: APP };
+  const actorRow = record({
+    ...shared,
+    actorId: "alice",
+    scope: "actor",
+    text: "Alice owns the private release signing policy",
+  });
+  const threadRow = record({
+    ...shared,
+    actorId: "alice",
+    threadId: "release-42",
+    scope: "thread",
+    text: "This thread uses the temporary amber canary",
+  });
+  const workspaceRow = record({
+    ...shared,
+    actorId: "alice",
+    scope: "workspace",
+    text: "The platform workspace deploys from the main branch",
+  });
+  const personalRow = record({
+    tenantId: t,
+    appId: APP,
+    actorId: "carol",
+    scope: "actor",
+    text: "Carol keeps this memory in her implicit personal space",
+  });
+  await provider!.ingest([actorRow, threadRow, workspaceRow, personalRow]);
+
+  const alice = { ...shared, actorId: "alice", accessThreadId: "release-42" };
+  const bob = { ...shared, actorId: "bob", accessThreadId: "release-99" };
+
+  assert.ok(await provider!.getById(actorRow.id, alice));
+  assert.equal(await provider!.getById(actorRow.id, bob), null);
+  assert.equal(
+    await provider!.applyFeedback({ memoryId: actorRow.id, signal: "negative", ...bob }),
+    null,
+  );
+
+  assert.ok(await provider!.getById(threadRow.id, alice));
+  assert.equal(await provider!.getById(threadRow.id, { ...alice, accessThreadId: "release-43" }), null);
+  assert.equal(
+    await provider!.applyFeedback({
+      memoryId: threadRow.id,
+      signal: "negative",
+      ...alice,
+      accessThreadId: "release-43",
+    }),
+    null,
+  );
+
+  assert.ok(await provider!.getById(workspaceRow.id, bob));
+  const sharedFeedback = await provider!.applyFeedback({
+    memoryId: workspaceRow.id,
+    signal: "positive",
+    ...bob,
+  });
+  assert.equal(sharedFeedback?.stats.positiveCount, 1);
+
+  assert.ok(await provider!.getById(personalRow.id, {
+    tenantId: t,
+    appId: APP,
+    actorId: "carol",
+  }), "actorId should resolve an omitted personal space");
+  assert.equal(await provider!.getById(personalRow.id, {
+    tenantId: t,
+    appId: APP,
+    actorId: "dave",
+  }), null);
+
+  const untouchedActor = await provider!.getById(actorRow.id, alice);
+  const untouchedThread = await provider!.getById(threadRow.id, alice);
+  assert.equal(untouchedActor?.stats.negativeCount, 0);
+  assert.equal(untouchedThread?.stats.negativeCount, 0);
+});
+
+test("retire atomically enforces id visibility and merges lifecycle metadata", { skip }, async () => {
+  const t = tenant("retirescope");
+  const shared = { tenantId: t, spaceId: "release-space", appId: APP };
+  const row = record({
+    ...shared,
+    actorId: "alice",
+    scope: "actor",
+    text: "Alice's release review is scheduled for Tuesday",
+    metadata: { retained: "yes" },
+  });
+  await provider!.ingest([row]);
+
+  const bob = { ...shared, actorId: "bob" };
+  assert.equal(
+    await provider!.retire(row.id, "superseded", { supersededBy: "replacement" }, bob),
+    null,
+    "another actor must not retire a private id inside the same space",
+  );
+  assert.ok(await provider!.getById(row.id, { ...shared, actorId: "alice" }));
+
+  const retired = await provider!.retire(
+    row.id,
+    "superseded",
+    { supersededBy: "replacement", reason: "schedule changed" },
+    { ...shared, actorId: "alice" },
+  );
+  assert.equal(retired?.status, "superseded");
+  assert.equal(retired?.metadata.retained, "yes");
+  assert.equal(retired?.metadata.supersededBy, "replacement");
+  assert.equal(await provider!.getById(row.id, { ...shared, actorId: "alice" }), null);
+  assert.equal(
+    await provider!.retire(row.id, "archived", undefined, { ...shared, actorId: "alice" }),
+    null,
+    "retirement must be one-way and idempotent for an already inactive row",
+  );
 });
 
 test("requireIdScope refuses unscoped getById and applyFeedback", { skip }, async () => {
@@ -515,14 +761,14 @@ test("requireIdScope refuses unscoped getById and applyFeedback", { skip }, asyn
 
   const strict = new PostgresMemoryProvider({ connectionString: env.url, poolMax: 2, requireIdScope: true });
   try {
-    await assert.rejects(() => strict.getById(row.id), /getById requires both tenantId and appId/);
+    await assert.rejects(() => strict.getById(row.id), /getById requires tenantId plus spaceId or actorId/);
     await assert.rejects(
       () => strict.applyFeedback({ memoryId: row.id, signal: "positive" }),
-      /applyFeedback requires both tenantId and appId/,
+      /applyFeedback requires tenantId plus spaceId or actorId/,
     );
 
-    assert.ok(await strict.getById(row.id, { tenantId: t, appId: APP }));
-    const fed = await strict.applyFeedback({ memoryId: row.id, signal: "positive", tenantId: t, appId: APP });
+    assert.ok(await strict.getById(row.id, { tenantId: t, appId: APP, actorId: "actor_1" }));
+    const fed = await strict.applyFeedback({ memoryId: row.id, signal: "positive", tenantId: t, appId: APP, actorId: "actor_1" });
     assert.equal(fed?.stats.positiveCount, 1);
   } finally {
     await strict.close();
@@ -535,7 +781,7 @@ test("re-ingest preserves accumulated feedback counters", { skip }, async () => 
   await provider!.ingest([row]);
 
   for (const signal of ["selected", "selected", "positive", "negative"] as const) {
-    await provider!.applyFeedback({ memoryId: row.id, signal, tenantId: t, appId: APP });
+    await provider!.applyFeedback({ memoryId: row.id, signal, tenantId: t, appId: APP, actorId: "actor_1" });
   }
 
   // The incoming record carries default zeroed stats, as any re-ingest of an
@@ -556,7 +802,7 @@ test("re-ingest preserves accumulated feedback counters", { skip }, async () => 
   });
   assert.deepEqual(backfilled.stats, { selectedCount: 9, positiveCount: 1, negativeCount: 1, accessCount: 4 });
 
-  const fetched = await provider!.getById(row.id, { tenantId: t, appId: APP });
+  const fetched = await provider!.getById(row.id, { tenantId: t, appId: APP, actorId: "actor_1" });
   assert.deepEqual(fetched?.stats, { selectedCount: 9, positiveCount: 1, negativeCount: 1, accessCount: 4 });
 });
 
@@ -590,7 +836,7 @@ test("concurrent batches sharing ids in opposite orders do not deadlock", { skip
     saved.map((memory) => memory.text),
     ["last write in the batch wins", "last write in the batch wins"],
   );
-  const stored = await provider!.getById(first.id, { tenantId: t, appId: APP });
+  const stored = await provider!.getById(first.id, { tenantId: t, appId: APP, actorId: "actor_dup" });
   assert.equal(stored?.text, "last write in the batch wins");
 });
 
@@ -609,7 +855,7 @@ test("applyFeedback increments stats atomically under concurrency", { skip }, as
     Array.from({ length: 20 }, () => provider!.applyFeedback({ memoryId: row.id, signal: "positive" })),
   );
 
-  const final = await provider!.getById(row.id, { tenantId: t, appId: APP });
+  const final = await provider!.getById(row.id, { tenantId: t, appId: APP, actorId: "actor_1" });
   assert.equal(final?.stats.positiveCount, 20, "concurrent increments lost an update");
   assert.equal(final?.stats.selectedCount, 1);
   assert.equal(final?.stats.negativeCount, 1);
@@ -653,11 +899,11 @@ test("compact archives decayed and superseded rows and returns real counts", { s
   await provider!.ingest([timeExpired, inactivityExpired, timeFresh, never, malformed, superseded]);
 
   // hideExpiredOnRead keeps decayed rows out of reads before compaction runs.
-  assert.equal(await provider!.getById(timeExpired.id, { tenantId: t, appId: APP }), null);
-  assert.equal(await provider!.getById(inactivityExpired.id, { tenantId: t, appId: APP }), null);
-  assert.ok(await provider!.getById(timeFresh.id, { tenantId: t, appId: APP }));
-  assert.ok(await provider!.getById(never.id, { tenantId: t, appId: APP }));
-  assert.ok(await provider!.getById(malformed.id, { tenantId: t, appId: APP }), "malformed ttlDays fell back to 180d");
+  assert.equal(await provider!.getById(timeExpired.id, { tenantId: t, appId: APP, actorId: "actor_1" }), null);
+  assert.equal(await provider!.getById(inactivityExpired.id, { tenantId: t, appId: APP, actorId: "actor_1" }), null);
+  assert.ok(await provider!.getById(timeFresh.id, { tenantId: t, appId: APP, actorId: "actor_1" }));
+  assert.ok(await provider!.getById(never.id, { tenantId: t, appId: APP, actorId: "actor_1" }));
+  assert.ok(await provider!.getById(malformed.id, { tenantId: t, appId: APP, actorId: "actor_1" }), "malformed ttlDays fell back to 180d");
 
   const result = await provider!.compact();
   // compact() is a global maintenance sweep, so other tenants can contribute.
@@ -686,8 +932,8 @@ test("compact archives decayed and superseded rows and returns real counts", { s
 });
 
 // ---------------------------------------------------------------------------
-// Vector / hybrid tests. 8 dims so the run also proves that
-// memory_core_ensure_embedding_dim() provisions arbitrary widths on demand.
+// Vector / hybrid tests. The preflight explicitly provisions 8 dimensions;
+// request paths must never create or alter vector tables on demand.
 // ---------------------------------------------------------------------------
 
 const QUERY = "how do I roll back a broken deployment";
@@ -736,7 +982,7 @@ test("hybrid RRF lets vector proximity overturn lexical-only ranking", { skip: s
     // Lexical only: the distractor shares every query term, so it wins.
     const lexicalOnly = await provider!.search({
       query: QUERY,
-      filters: { tenantId: t, appId: APP },
+      filters: { tenantId: t, appId: APP, actorId: "actor_hybrid" },
       limit: 10,
       minScore: 0,
     });
@@ -751,7 +997,7 @@ test("hybrid RRF lets vector proximity overturn lexical-only ranking", { skip: s
     // rank 9, and RRF flips the ordering.
     const fused = await hybrid.search({
       query: QUERY,
-      filters: { tenantId: t, appId: APP },
+      filters: { tenantId: t, appId: APP, actorId: "actor_hybrid" },
       limit: 10,
       minScore: 0,
     });
@@ -801,7 +1047,7 @@ test("vector recall finds rows with no lexical overlap at all", { skip: skipVect
     // has to come from the vector CTE.
     const hits = await hybrid.search({
       query: FILLERS[0],
-      filters: { tenantId: t, appId: APP },
+      filters: { tenantId: t, appId: APP, actorId: "actor_vec" },
       limit: 5,
       minScore: 0,
     });
@@ -812,6 +1058,32 @@ test("vector recall finds rows with no lexical overlap at all", { skip: skipVect
     );
   } finally {
     await hybrid.close();
+  }
+});
+
+test("vector search excludes rows embedded by a different model in the same dimension", { skip: skipVector }, async () => {
+  const t = tenant("vectormodel");
+  const row = record({ tenantId: t, actorId: "actor_model", text: SEMANTIC_TARGET });
+  const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+  const hybrid = new PostgresMemoryProvider({
+    connectionString: env.url,
+    poolMax: 2,
+    embedder: new FixtureEmbedder(8, FIXTURE_VECTORS),
+    embeddingModel: "fixture-current",
+  });
+  try {
+    await hybrid.ingest([row]);
+    await pool.query("UPDATE memory_embeddings_8 SET model = 'fixture-retired' WHERE memory_id = $1", [row.id]);
+    const hits = await hybrid.search({
+      query: FILLERS[0],
+      filters: { tenantId: t, appId: APP, actorId: "actor_model" },
+      limit: 5,
+      minScore: 0,
+    });
+    assert.deepEqual(ids(hits), [], "incompatible model coordinates must not enter vector fusion");
+  } finally {
+    await hybrid.close();
+    await pool.end();
   }
 });
 
@@ -836,7 +1108,7 @@ test("a blocked cross-tenant collision leaves the victim's vector row intact", {
 
     await assert.rejects(
       () => hybrid.ingest([{ ...victim, tenantId: b, actorId: "actor_vec_b", text: LEXICAL_DISTRACTOR }]),
-      /already exists under a different tenant\/app scope/,
+      /already exists under a different ownership scope/,
     );
 
     const after = await pool.query<{ tenant_id: string; app_id: string; embedding: string }>(probe, [victim.id]);
@@ -844,6 +1116,73 @@ test("a blocked cross-tenant collision leaves the victim's vector row intact", {
   } finally {
     await pool.end();
     await hybrid.close();
+  }
+});
+
+test("a hosted embedding outage degrades search to lexical retrieval with a cooldown", { skip: skipVector }, async () => {
+  const t = tenant("vectorfallback");
+  const row = record({ tenantId: t, actorId: "actor_fallback", text: "the release gateway uses a blue canary" });
+  await provider!.ingest([row]);
+  let embedCalls = 0;
+  const hybrid = new PostgresMemoryProvider({
+    connectionString: env.url,
+    poolMax: 2,
+    embedderCooldownMs: 60_000,
+    embedder: {
+      dims: 8,
+      async embed() {
+        embedCalls += 1;
+        throw new Error("simulated hosted embedding outage");
+      },
+    },
+  });
+  try {
+    const query = {
+      query: "release gateway blue canary",
+      filters: { tenantId: t, appId: APP, actorId: "actor_fallback" },
+      minScore: 0,
+    };
+    assert.deepEqual(ids(await hybrid.search(query)), [row.id]);
+    assert.deepEqual(ids(await hybrid.search(query)), [row.id]);
+    assert.equal(embedCalls, 1, "the cooldown must prevent an upstream call on every search");
+  } finally {
+    await hybrid.close();
+  }
+});
+
+test("search never provisions a missing embedding dimension on its request path", { skip: skipVector }, async () => {
+  const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+  const t = tenant("noddlsearch");
+  const row = record({ tenantId: t, actorId: "actor_noddl", text: "lexical fallback remains available" });
+  await provider!.ingest([row]);
+  const unprovisionedDims = 15_997;
+  const before = await pool.query<{ relation: string | null }>(
+    `SELECT to_regclass('memory_embeddings_${unprovisionedDims}')::text AS relation`,
+  );
+  assert.equal(before.rows[0]?.relation, null, "fixture dimension unexpectedly exists; choose another test dimension");
+  const hybrid = new PostgresMemoryProvider({
+    connectionString: env.url,
+    poolMax: 2,
+    embedder: {
+      dims: unprovisionedDims,
+      async embed() {
+        throw new Error("embed should not run before provisioning is verified");
+      },
+    },
+  });
+  try {
+    assert.deepEqual(ids(await hybrid.search({
+      query: "lexical fallback available",
+      filters: { tenantId: t, appId: APP, actorId: "actor_noddl" },
+      minScore: 0,
+    })), [row.id]);
+    const relation = await pool.query<{ relation: string | null }>(
+      `SELECT to_regclass('memory_embeddings_${unprovisionedDims}')::text AS relation`,
+    );
+    assert.equal(relation.rows[0]?.relation, null);
+  } finally {
+    await hybrid.close();
+    await pool.end();
   }
 });
 

@@ -9,7 +9,7 @@ const F = { tenantId: "t", appId: "a", actorId: "u" };
 function rec(id: string, text: string): MemoryRecord {
   const now = new Date().toISOString();
   return {
-    id, ...F, threadId: null, scope: "actor", memoryType: "preference", text,
+    id, ...F, spaceId: F.actorId, threadId: null, scope: "actor", memoryType: "preference", text,
     summary: null, metadata: {}, confidence: 0.7, importance: 0.5, status: "active",
     source: { sourceType: "test" }, decayPolicy: { kind: "none" },
     firstSeenAt: now, lastSeenAt: now, createdAt: now, updatedAt: now,

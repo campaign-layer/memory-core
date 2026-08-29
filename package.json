@@ -6,9 +6,29 @@
   "type": "module",
   "description": "Standalone memory core service for multi-app AI context and profile memory",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/integrations/generate-schemas.*",
+    "!dist/integrations/verify-mcp.*",
+    "migrations",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./integrations/mcp-server.js": {
+      "types": "./dist/integrations/mcp-server.d.ts",
+      "import": "./dist/integrations/mcp-server.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
@@ -20,6 +40,7 @@
     "bench": "tsx bench/run.ts",
     "bench:small": "tsx bench/run.ts --size=small --json=bench/out/baseline-small.json",
     "bench:large": "tsx bench/run.ts --size=large --json=bench/out/baseline-large.json",
+    "bench:context": "tsx bench/context.ts --size=small",
     "bench:dataset": "tsx bench/dataset/generate.ts",
     "bench:typecheck": "tsc -p bench/tsconfig.json --noEmit",
     "verify:mcp": "tsx src/integrations/verify-mcp.ts",

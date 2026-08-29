@@ -118,6 +118,7 @@ export function toMemoryRecord(m: MaterializedMemory): MemoryRecord {
   return {
     id: m.id,
     tenantId: BENCH_TENANT,
+    spaceId: BENCH_ACTOR,
     appId: BENCH_APP,
     actorId: BENCH_ACTOR,
     threadId: m.sessionId,

@@ -70,7 +70,10 @@ export class TransformersEmbedder implements EmbeddingProvider {
 
   private async ensure(): Promise<any> {
     if (this.pipe) return this.pipe;
-    const mod: any = await import("@huggingface/transformers");
+    // Keep the opt-in encoder out of the static module graph so clean runtime
+    // installs that intentionally omit optional dependencies still typecheck.
+    const specifier = "@huggingface/transformers";
+    const mod: any = await import(specifier);
     this.pipe = await mod.pipeline("feature-extraction", this.modelId, { dtype: "fp32" });
     return this.pipe;
   }

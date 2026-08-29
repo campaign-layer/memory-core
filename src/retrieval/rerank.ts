@@ -6,6 +6,14 @@ export interface Reranker {
   rerank(query: string, docs: TextDoc[], topK: number): Promise<Scored[]>;
 }
 
+/** Backends `createReranker` can build. `none` preserves provider-native ranking. */
+export type RerankerKind = "none" | "voyage";
+
+export interface RerankerSpec {
+  kind: RerankerKind;
+  model?: string;
+}
+
 /** Keeps the incoming order; scores decay by position so they stay sortable. */
 export class NoopReranker implements Reranker {
   readonly id = "noop";
@@ -27,7 +35,7 @@ interface VoyageRerankResponse {
   data: Array<{ index: number; relevance_score: number }>;
 }
 
-/** Voyage cross-encoder rerank (default rerank-2). Key-gated. */
+/** Voyage cross-encoder rerank (default rerank-2.5). Key-gated. */
 export class VoyageReranker implements Reranker {
   readonly id: string;
   private readonly model: string;
@@ -36,9 +44,12 @@ export class VoyageReranker implements Reranker {
   private readonly batchSize: number;
 
   constructor(options: VoyageRerankerOptions = {}) {
-    this.model = options.model ?? "rerank-2";
+    this.model = options.model ?? "rerank-2.5";
     this.apiKey = options.apiKey ?? process.env.VOYAGE_API_KEY;
-    this.retry = options.retry;
+    // This sits synchronously on the read path. The generic hosted-client
+    // defaults can spend minutes across retries; fail open through the service
+    // circuit breaker after one bounded attempt instead.
+    this.retry = options.retry ?? { maxRetries: 0, timeoutMs: 5_000 };
     this.batchSize = options.batchSize ?? 100;
     this.id = `voyage:${this.model}`;
   }
@@ -59,6 +70,7 @@ export class VoyageReranker implements Reranker {
           query,
           documents: batch.map((doc) => doc.text),
           top_k: Math.min(topK, batch.length),
+          truncation: true,
         },
         { authorization: `Bearer ${this.apiKey}` },
         this.retry,
@@ -71,5 +83,19 @@ export class VoyageReranker implements Reranker {
 
     all.sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1));
     return all.slice(0, topK);
+  }
+}
+
+/** Cheap construction; the hosted backend does not make a request until rerank(). */
+export function createReranker(spec: RerankerSpec): Reranker | null {
+  switch (spec.kind) {
+    case "none":
+      return null;
+    case "voyage":
+      return new VoyageReranker({ model: spec.model });
+    default: {
+      const exhaustive: never = spec.kind;
+      throw new Error(`unknown reranker kind: ${String(exhaustive)}`);
+    }
   }
 }

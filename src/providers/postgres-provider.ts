@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import type { Pool as PgPool, PoolClient } from "pg";
-import type { MemoryProvider, ProviderHealthStatus } from "../provider.js";
+import type { MemoryIdScope, MemoryProvider, ProviderHealthStatus } from "../provider.js";
 import type {
   DecayPolicy,
   MemoryCompactResult,
@@ -10,6 +12,7 @@ import type {
   MemoryFeedbackStats,
   MemoryFilters,
   MemoryRecord,
+  MemoryRetirementStatus,
   MemoryScope,
   MemorySearchHit,
   MemorySearchQuery,
@@ -17,6 +20,7 @@ import type {
   MemoryStatus,
   MemoryType,
 } from "../types.js";
+import { accessSpaceId, normalizeRecordSpace } from "../access.js";
 
 const { Pool } = pg;
 
@@ -26,6 +30,7 @@ const { Pool } = pg;
  * is accepted.
  */
 export interface EmbeddingProviderLike {
+  readonly id?: string;
   readonly dims: number;
   embed(texts: string[]): Promise<Float32Array[]>;
 }
@@ -44,6 +49,8 @@ export interface PostgresProviderOptions {
   /** Label stored next to each vector so re-embedding runs are identifiable. */
   embeddingModel?: string;
   embedOnIngest?: boolean;
+  /** Skip hosted vector retrieval for this long after a search-time failure. */
+  embedderCooldownMs?: number;
   /** RRF rank constant. Larger values flatten the advantage of the top ranks. */
   rrfK?: number;
   lexicalWeight?: number;
@@ -55,7 +62,7 @@ export interface PostgresProviderOptions {
   /** Safety cap on the otherwise unbounded listByActor interface. */
   maxListRows?: number;
   /** Fail closed on the two id-keyed paths (getById, applyFeedback) when the
-   *  caller supplies no tenant/app. Off by default: MemoryProvider declares both
+   *  caller supplies no tenant plus space/actor. Off by default: MemoryProvider declares both
    *  without a tenant, so requiring one breaks interface callers. */
   requireIdScope?: boolean;
   autoMigrate?: boolean;
@@ -67,6 +74,7 @@ export const DEFAULT_PG_URL = "postgres://madhavgoyal@localhost:5432/memory_core
 const MEMORY_COLUMNS = [
   "id",
   "tenant_id",
+  "space_id",
   "app_id",
   "actor_id",
   "thread_id",
@@ -103,6 +111,7 @@ const MAX_CANDIDATES = 1_000;
 interface MemoryRow {
   id: string;
   tenant_id: string;
+  space_id: string;
   app_id: string;
   actor_id: string;
   thread_id: string | null;
@@ -163,6 +172,56 @@ function assertScope(tenantId: string | undefined, appId: string | undefined, wh
   }
 }
 
+function assertIdScope(scope: MemoryIdScope | undefined, where: string): void {
+  if (!scope?.tenantId || (!scope.spaceId && !scope.actorId)) {
+    throw new Error(`postgres-provider: ${where} requires tenantId plus spaceId or actorId (refusing an unscoped id)`);
+  }
+}
+
+/** SQL equivalent of memoryVisibleToIdScope(), kept on the mutating statement
+ * so a concurrent rewrite cannot create a check/use authorization race. */
+function idScopeSql(
+  alias: string,
+  scope: MemoryIdScope,
+  params: unknown[],
+  where: string,
+): string {
+  assertIdScope(scope, where);
+  const add = (value: unknown): string => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+
+  const tenantRef = add(scope.tenantId);
+  const predicates = [`${alias}.tenant_id = ${tenantRef}`];
+
+  const effectiveSpaceId = scope.spaceId?.trim() || scope.actorId?.trim();
+  const spaceRef = add(effectiveSpaceId!);
+  const visibility = [
+    `${alias}.scope = 'tenant'`,
+    `(${alias}.scope = 'workspace' AND ${alias}.space_id = ${spaceRef})`,
+  ];
+  if (scope.appId) {
+    visibility.push(
+      `(${alias}.scope = 'app' AND ${alias}.space_id = ${spaceRef} AND ${alias}.app_id = ${add(scope.appId)})`,
+    );
+  }
+  if (scope.actorId) {
+    const actorRef = add(scope.actorId);
+    visibility.push(
+      `(${alias}.scope = 'actor' AND ${alias}.space_id = ${spaceRef} AND ${alias}.actor_id = ${actorRef})`,
+    );
+    if (scope.accessThreadId) {
+      visibility.push(
+        `(${alias}.scope = 'thread' AND ${alias}.space_id = ${spaceRef} AND ` +
+          `${alias}.actor_id = ${actorRef} AND ${alias}.thread_id = ${add(scope.accessThreadId)})`,
+      );
+    }
+  }
+  predicates.push(`(${visibility.join(" OR ")})`);
+  return predicates.map((predicate) => ` AND ${predicate}`).join("");
+}
+
 function toIso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
@@ -177,6 +236,7 @@ function mapRow(row: MemoryRow): MemoryRecord {
   return {
     id: row.id,
     tenantId: row.tenant_id,
+    spaceId: row.space_id,
     appId: row.app_id,
     actorId: row.actor_id,
     threadId: row.thread_id,
@@ -305,11 +365,13 @@ function isMissingRelation(error: unknown): boolean {
 }
 
 export class PostgresMemoryProvider implements MemoryProvider {
+  readonly defaultMinScore = 0.2;
   private readonly pool: PgPool;
   private readonly ownsPool: boolean;
   private readonly embedder: EmbeddingProviderLike | null;
   private readonly embeddingModel: string;
   private readonly embedOnIngest: boolean;
+  private readonly embedderCooldownMs: number;
   private readonly rrfK: number;
   private readonly lexicalWeight: number;
   private readonly vectorWeight: number;
@@ -318,10 +380,13 @@ export class PostgresMemoryProvider implements MemoryProvider {
   private readonly maxListRows: number;
   private readonly requireIdScope: boolean;
   private readonly autoMigrate: boolean;
-  private readonly migrationFile: string;
+  private readonly migrationFiles: string[];
 
   private migratePromise: Promise<void> | null = null;
   private vectorPromise: Promise<VectorTarget> | null = null;
+  private vectorSearchDisabledUntil = 0;
+  private vectorSearchWarned = false;
+  private vectorSearchFailures = 0;
   private closed = false;
 
   constructor(options: PostgresProviderOptions = {}) {
@@ -352,8 +417,9 @@ export class PostgresMemoryProvider implements MemoryProvider {
     this.pool.on("error", () => {});
 
     this.embedder = options.embedder ?? null;
-    this.embeddingModel = options.embeddingModel || "unspecified";
+    this.embeddingModel = options.embeddingModel || this.embedder?.id || "unspecified";
     this.embedOnIngest = options.embedOnIngest ?? true;
+    this.embedderCooldownMs = Math.max(1_000, options.embedderCooldownMs ?? 60_000);
     this.rrfK = options.rrfK ?? 60;
     this.lexicalWeight = options.lexicalWeight ?? 1;
     this.vectorWeight = options.vectorWeight ?? 1;
@@ -362,18 +428,95 @@ export class PostgresMemoryProvider implements MemoryProvider {
     this.maxListRows = options.maxListRows ?? 1_000;
     this.requireIdScope = options.requireIdScope ?? false;
     this.autoMigrate = options.autoMigrate ?? false;
-    this.migrationFile =
-      options.migrationFile || fileURLToPath(new URL("../../migrations/001_init.sql", import.meta.url));
+    this.migrationFiles = options.migrationFile
+      ? [options.migrationFile]
+      : [
+          fileURLToPath(new URL("../../migrations/001_init.sql", import.meta.url)),
+          fileURLToPath(new URL("../../migrations/002_memory_spaces.sql", import.meta.url)),
+        ];
   }
 
   // -- lifecycle ------------------------------------------------------------
 
-  /** Applies migrations/001_init.sql. Idempotent and safe to call repeatedly. */
+  /** Applies schema/provisioning migrations. Idempotent; call during deploy, not on a request path. */
   async migrate(): Promise<void> {
     if (!this.migratePromise) {
       this.migratePromise = (async () => {
-        const sql = await readFile(this.migrationFile, "utf8");
-        await this.pool.query(sql);
+        const client = await this.pool.connect();
+        try {
+          await client.query("SELECT pg_advisory_lock(hashtext('memory-core:schema-migrations'))");
+          await client.query(
+            `CREATE TABLE IF NOT EXISTS memory_core_migrations (
+               version text PRIMARY KEY,
+               checksum text,
+               applied_at timestamptz NOT NULL DEFAULT now()
+             )`,
+          );
+          const ledgerShape = await client.query<{ checksum_column: boolean }>(
+            `SELECT EXISTS (
+               SELECT 1 FROM pg_attribute
+                WHERE attrelid = 'memory_core_migrations'::regclass
+                  AND attname = 'checksum' AND NOT attisdropped
+             ) AS checksum_column`,
+          );
+          if (!ledgerShape.rows[0]?.checksum_column) {
+            await client.query("ALTER TABLE memory_core_migrations ADD COLUMN checksum text");
+          }
+          for (const migrationFile of this.migrationFiles) {
+            const version = path.basename(migrationFile, ".sql");
+            const sql = await readFile(migrationFile, "utf8");
+            const checksum = createHash("sha256").update(sql).digest("hex");
+            const applied = await client.query<{ checksum: string | null }>(
+              "SELECT checksum FROM memory_core_migrations WHERE version = $1",
+              [version],
+            );
+            if ((applied.rowCount ?? 0) > 0) {
+              const recorded = applied.rows[0]?.checksum;
+              if (recorded && recorded !== checksum) {
+                throw new Error(
+                  `postgres-provider: applied migration ${version} checksum mismatch ` +
+                    `(database=${recorded}, source=${checksum}); never edit an applied migration`,
+                );
+              }
+              // Older ledgers predate checksums. Pin their current, operator-
+              // supplied source once; every subsequent startup verifies it.
+              if (!recorded) {
+                await client.query(
+                  "UPDATE memory_core_migrations SET checksum = $2 WHERE version = $1 AND checksum IS NULL",
+                  [version, checksum],
+                );
+              }
+              continue;
+            }
+            await client.query(sql);
+            await client.query(
+              `INSERT INTO memory_core_migrations (version, checksum) VALUES ($1, $2)
+               ON CONFLICT (version) DO UPDATE SET checksum = EXCLUDED.checksum
+               WHERE memory_core_migrations.checksum IS NULL`,
+              [version, checksum],
+            );
+          }
+          if (this.embedder) {
+            const table = `memory_embeddings_${this.embedder.dims}`;
+            const provisioned = await client.query<{ relation: string | null }>(
+              "SELECT to_regclass($1)::text AS relation",
+              [table],
+            );
+            // The provisioning function performs DDL and index creation. Call
+            // it only for a genuinely new dimension; existing tables were
+            // upgraded by versioned migration 002 and must not take needless
+            // ACCESS EXCLUSIVE locks on every process restart.
+            if (!provisioned.rows[0]?.relation) {
+              await client.query("SELECT memory_core_ensure_embedding_dim($1)", [this.embedder.dims]);
+            }
+          }
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw error;
+        } finally {
+          await client.query("SELECT pg_advisory_unlock(hashtext('memory-core:schema-migrations'))").catch(() => {});
+          client.release();
+        }
       })().catch((error) => {
         this.migratePromise = null;
         throw error;
@@ -426,27 +569,23 @@ export class PostgresMemoryProvider implements MemoryProvider {
       );
     }
 
-    let table: string;
-    try {
-      const created = await this.pool.query<{ table_name: string }>(
-        "SELECT memory_core_ensure_embedding_dim($1) AS table_name",
-        [width],
-      );
-      table = created.rows[0]?.table_name ?? "";
-    } catch (error) {
-      if (isMissingRelation(error)) {
-        throw new Error(
-          "postgres-provider: memory_core_ensure_embedding_dim() is missing. Apply migrations/001_init.sql " +
-            "(or construct the provider with autoMigrate: true).",
-        );
-      }
-      throw error;
-    }
+    const table = `memory_embeddings_${width}`;
 
     // Always an integer-suffixed name generated by the migration, but it reaches
     // SQL by interpolation so it is validated regardless.
     if (!/^memory_embeddings_\d+$/.test(table)) {
       throw new Error(`postgres-provider: unexpected embedding table name "${table}"`);
+    }
+
+    const provisioned = await this.pool.query<{ relation: string | null }>(
+      "SELECT to_regclass($1)::text AS relation",
+      [table],
+    );
+    if (!provisioned.rows[0]?.relation) {
+      throw new Error(
+        `postgres-provider: ${table} is not provisioned. During deployment run ` +
+          `SELECT memory_core_ensure_embedding_dim(${width}); or call provider.migrate().`,
+      );
     }
 
     // HNSW over `vector` is capped at 2000 dims, so wider models are indexed
@@ -481,10 +620,9 @@ export class PostgresMemoryProvider implements MemoryProvider {
   }
 
   /**
-   * Resolves the vector table and computes literals *before* a transaction is
-   * opened. Provisioning a new dimension needs a lock on `memories` that our own
-   * open transaction would block, and the embedder may be a slow network call
-   * that has no business holding a transaction open.
+   * Resolves the already-provisioned vector table and computes literals before a
+   * transaction is opened. The embedder may be a slow network call that has no
+   * business holding a transaction open.
    */
   private async prepareEmbeddings(
     records: MemoryRecord[],
@@ -513,17 +651,17 @@ export class PostgresMemoryProvider implements MemoryProvider {
       const rows = chunk.map((record) => {
         const literal = literals.get(record.id);
         if (literal === undefined) throw new Error(`postgres-provider: missing embedding for ${record.id}`);
-        return `(${params.add(record.id)}, ${params.add(record.tenantId)}, ${params.add(record.appId)}, ` +
+        return `(${params.add(record.id)}, ${params.add(record.tenantId)}, ${params.add(record.spaceId)}, ${params.add(record.appId)}, ` +
           `${params.add(this.embeddingModel)}, ${params.add(target.dims)}, ` +
           `${params.add(literal)}::vector(${target.dims}))`;
       });
 
-      // Never reassign tenant_id/app_id: that would repoint another tenant's
+      // Never reassign tenant_id/space_id/app_id: that would repoint another tenant's
       // vector row at this caller's content. The WHERE guard makes a
       // cross-scope collision a no-op, which the row count below turns into an
       // error rather than a silently stale vector.
       const result = await client.query(
-        `INSERT INTO ${target.table} (memory_id, tenant_id, app_id, model, dims, embedding)
+        `INSERT INTO ${target.table} (memory_id, tenant_id, space_id, app_id, model, dims, embedding)
          VALUES ${rows.join(", ")}
          ON CONFLICT (memory_id) DO UPDATE SET
            model = EXCLUDED.model,
@@ -531,6 +669,7 @@ export class PostgresMemoryProvider implements MemoryProvider {
            embedding = EXCLUDED.embedding,
            updated_at = now()
          WHERE ${target.table}.tenant_id = EXCLUDED.tenant_id
+           AND ${target.table}.space_id = EXCLUDED.space_id
            AND ${target.table}.app_id = EXCLUDED.app_id
          RETURNING memory_id`,
         params.values,
@@ -538,7 +677,7 @@ export class PostgresMemoryProvider implements MemoryProvider {
 
       if ((result.rowCount ?? 0) !== chunk.length) {
         throw new Error(
-          "postgres-provider: refusing to overwrite an embedding row owned by a different tenant/app scope",
+          "postgres-provider: refusing to overwrite an embedding row owned by a different tenant/space scope",
         );
       }
     }
@@ -550,6 +689,8 @@ export class PostgresMemoryProvider implements MemoryProvider {
     if (records.length === 0) return [];
     await this.ready();
 
+    records = records.map(normalizeRecordSpace);
+
     for (const record of records) {
       assertScope(record.tenantId, record.appId, "ingest");
       if (!record.id) throw new Error("postgres-provider: ingest requires a record id");
@@ -560,7 +701,7 @@ export class PostgresMemoryProvider implements MemoryProvider {
 
     return this.withTransaction(async (client) => {
       const byId = new Map<string, MemoryRecord>();
-      // 20 binds per row; 500 rows stays well inside the 65535 bind limit.
+      // 21 binds per row; 500 rows stays well inside the 65535 bind limit.
       for (let offset = 0; offset < ordered.length; offset += 500) {
         for (const row of await this.upsertChunk(client, ordered.slice(offset, offset + 500))) {
           byId.set(row.id, row);
@@ -581,6 +722,7 @@ export class PostgresMemoryProvider implements MemoryProvider {
       const cells = [
         params.add(record.id),
         params.add(record.tenantId),
+        params.add(record.spaceId),
         params.add(record.appId),
         params.add(record.actorId),
         params.add(record.threadId ?? null),
@@ -604,9 +746,9 @@ export class PostgresMemoryProvider implements MemoryProvider {
     });
 
     // Re-ingesting a known id refreshes mutable fields but never moves the
-    // creation timestamps forward. tenant_id/app_id are deliberately absent from
-    // the SET list and guarded in the WHERE: `id` is a global primary key, so
-    // reassigning them would hand another tenant's row to this caller.
+    // creation timestamps forward. tenant_id/space_id/app_id are deliberately
+    // absent from the SET list: an id is global and must never move to another
+    // trust boundary or silently change its producer provenance.
     const result = await client.query<MemoryRow>(
       `INSERT INTO memories (${columnList()})
        VALUES ${rows.join(", ")}
@@ -629,7 +771,11 @@ export class PostgresMemoryProvider implements MemoryProvider {
          updated_at = EXCLUDED.updated_at,
          stats = ${mergeStatsSql()}
        WHERE memories.tenant_id = EXCLUDED.tenant_id
+         AND memories.space_id = EXCLUDED.space_id
          AND memories.app_id = EXCLUDED.app_id
+         AND memories.actor_id = EXCLUDED.actor_id
+         AND memories.scope = EXCLUDED.scope
+         AND memories.thread_id IS NOT DISTINCT FROM EXCLUDED.thread_id
        RETURNING ${columnList()}`,
       params.values,
     );
@@ -642,7 +788,7 @@ export class PostgresMemoryProvider implements MemoryProvider {
       const blocked = records.filter((record) => !returned.has(record.id)).map((record) => record.id);
       throw new Error(
         `postgres-provider: ingest refused ${blocked.length} record(s) whose id already exists under a ` +
-          `different tenant/app scope: ${blocked.slice(0, 5).join(", ")}${blocked.length > 5 ? ", ..." : ""}`,
+          `different ownership scope: ${blocked.slice(0, 5).join(", ")}${blocked.length > 5 ? ", ..." : ""}`,
       );
     }
     return result.rows.map(mapRow);
@@ -655,27 +801,43 @@ export class PostgresMemoryProvider implements MemoryProvider {
   }
 
   /**
-   * Scoped whenever the caller supplies tenantId/appId. Both are optional
+   * Scoped whenever the caller supplies access context. The fields are optional
    * because MemoryFeedbackInput is a public library type, so a legacy in-process
    * caller can still increment by bare id and read the row back; the HTTP
-   * feedback route requires both so the externally reachable surface is scoped.
+   * feedback route requires the caller identity so the externally reachable
+   * surface is scoped down to private actor/thread records too.
    * Construct with `requireIdScope: true` to reject unscoped calls outright.
    */
   async applyFeedback(feedback: MemoryFeedbackInput): Promise<MemoryRecord | null> {
     await this.ready();
     const key = FEEDBACK_KEYS[feedback.signal];
     if (!key) throw new Error(`postgres-provider: unknown feedback signal "${feedback.signal}"`);
-    if (this.requireIdScope) assertScope(feedback.tenantId, feedback.appId, "applyFeedback");
+    if (this.requireIdScope) {
+      assertIdScope(
+        feedback.tenantId
+          ? {
+              tenantId: feedback.tenantId,
+              spaceId: feedback.spaceId,
+              appId: feedback.appId,
+              actorId: feedback.actorId,
+              accessThreadId: feedback.accessThreadId,
+            }
+          : undefined,
+        "applyFeedback",
+      );
+    }
 
     const params: unknown[] = [feedback.memoryId, key];
     let scopeSql = "";
-    if (feedback.tenantId) {
-      params.push(feedback.tenantId);
-      scopeSql += ` AND m.tenant_id = $${params.length}`;
-    }
-    if (feedback.appId) {
-      params.push(feedback.appId);
-      scopeSql += ` AND m.app_id = $${params.length}`;
+    if (feedback.tenantId || feedback.spaceId || feedback.appId || feedback.actorId || feedback.accessThreadId) {
+      if (!feedback.tenantId) return null;
+      scopeSql = idScopeSql("m", {
+        tenantId: feedback.tenantId,
+        spaceId: feedback.spaceId,
+        appId: feedback.appId,
+        actorId: feedback.actorId,
+        accessThreadId: feedback.accessThreadId,
+      }, params, "applyFeedback");
     }
 
     // A single statement, so the row lock makes the increment atomic; no
@@ -692,7 +854,9 @@ export class PostgresMemoryProvider implements MemoryProvider {
                 true),
               last_seen_at = now(),
               updated_at = now()
-        WHERE m.id = $1 AND m.status = 'active'${scopeSql}
+        WHERE m.id = $1
+          AND m.status = 'active'${scopeSql}
+          ${this.hideExpiredOnRead ? `AND NOT ${expiredSql("m")}` : ""}
         RETURNING ${columnList()}`,
       params,
     );
@@ -708,27 +872,46 @@ export class PostgresMemoryProvider implements MemoryProvider {
     filters: MemoryFilters,
     params: Params,
     where: string,
-  ): { sql: string; tenantRef: string; appRef: string } {
+  ): { sql: string; tenantRef: string } {
     assertScope(filters?.tenantId, filters?.appId, where);
     const tenantRef = params.add(filters.tenantId);
+    const spaceRef = params.add(accessSpaceId(filters));
     const appRef = params.add(filters.appId);
+    const visibility = [
+      `${alias}.scope = 'tenant'`,
+      `(${alias}.space_id = ${spaceRef} AND ${alias}.scope = 'workspace')`,
+      `(${alias}.space_id = ${spaceRef} AND ${alias}.scope = 'app' AND ${alias}.app_id = ${appRef})`,
+    ];
+    if (filters.actorId) {
+      const actorRef = params.add(filters.actorId);
+      visibility.push(`(${alias}.space_id = ${spaceRef} AND ${alias}.scope = 'actor' AND ${alias}.actor_id = ${actorRef})`);
+      const accessThreadId = filters.accessThreadId ?? filters.threadId;
+      if (accessThreadId) {
+        const threadRef = params.add(accessThreadId);
+        visibility.push(
+          `(${alias}.space_id = ${spaceRef} AND ${alias}.scope = 'thread' AND ${alias}.actor_id = ${actorRef} AND ${alias}.thread_id = ${threadRef})`,
+        );
+      }
+    }
 
-    const parts = [`${alias}.tenant_id = ${tenantRef}`, `${alias}.app_id = ${appRef}`, `${alias}.status = 'active'`];
-
-    if (filters.actorId) parts.push(`${alias}.actor_id = ${params.add(filters.actorId)}`);
-    if (filters.threadId) parts.push(`${alias}.thread_id = ${params.add(filters.threadId)}`);
+    const parts = [
+      `${alias}.tenant_id = ${tenantRef}`,
+      `${alias}.status = 'active'`,
+      `(${visibility.join(" OR ")})`,
+    ];
     if (filters.memoryTypes && filters.memoryTypes.length > 0) {
       parts.push(`${alias}.memory_type = ANY(${params.add(filters.memoryTypes)}::text[])`);
     }
     if (filters.scope && filters.scope.length > 0) {
       parts.push(`${alias}.scope = ANY(${params.add(filters.scope)}::text[])`);
     }
+    if (filters.threadId) parts.push(`${alias}.thread_id = ${params.add(filters.threadId)}`);
     if (filters.metadata && Object.keys(filters.metadata).length > 0) {
       parts.push(`${alias}.metadata @> ${params.add(JSON.stringify(filters.metadata))}::jsonb`);
     }
     if (this.hideExpiredOnRead) parts.push(`NOT ${expiredSql(alias)}`);
 
-    return { sql: parts.join("\n           AND "), tenantRef, appRef };
+    return { sql: parts.join("\n           AND "), tenantRef };
   }
 
   async search(query: MemorySearchQuery): Promise<MemorySearchHit[]> {
@@ -739,11 +922,31 @@ export class PostgresMemoryProvider implements MemoryProvider {
 
     if (text.length === 0) return this.recentHits(query.filters, limit, minScore);
 
-    const target = await this.vectorTarget();
+    let target: VectorTarget | null = null;
     let queryVector: string | null = null;
-    if (target) {
-      const [vector] = await this.embedTexts([text]);
-      queryVector = toVectorLiteral(vector, target.dims);
+    if (this.embedder && Date.now() >= this.vectorSearchDisabledUntil) {
+      try {
+        target = await this.vectorTarget();
+        if (target) {
+          const [vector] = await this.embedTexts([text]);
+          queryVector = toVectorLiteral(vector, target.dims);
+          this.vectorSearchDisabledUntil = 0;
+          this.vectorSearchWarned = false;
+        }
+      } catch (error) {
+        this.vectorSearchFailures += 1;
+        this.vectorSearchDisabledUntil = Date.now() + this.embedderCooldownMs;
+        if (!this.vectorSearchWarned) {
+          this.vectorSearchWarned = true;
+          const detail = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[memory-core] postgres vector search unavailable; using lexical retrieval ` +
+              `(retrying in ${this.embedderCooldownMs}ms, logged once): ${detail}`,
+          );
+        }
+        target = null;
+        queryVector = null;
+      }
     }
 
     const params = new Params();
@@ -757,13 +960,14 @@ export class PostgresMemoryProvider implements MemoryProvider {
     let vectorCte = "vec_raw AS (SELECT NULL::text AS id, 0::float8 AS raw WHERE false)";
     if (target && queryVector !== null) {
       const vectorRef = params.add(queryVector);
+      const vectorModelRef = params.add(this.embeddingModel);
       const distance = target.distance("e.embedding", vectorRef);
       vectorCte = `vec_raw AS (
           SELECT e.memory_id AS id, (1 - (${distance}))::float8 AS raw
             FROM ${target.table} e
             JOIN memories m ON m.id = e.memory_id
            WHERE e.tenant_id = ${filter.tenantRef}
-             AND e.app_id = ${filter.appRef}
+             AND e.model = ${vectorModelRef}
              AND ${filter.sql}
            ORDER BY ${distance}
            LIMIT ${candidateRef}
@@ -887,6 +1091,7 @@ export class PostgresMemoryProvider implements MemoryProvider {
   async findDuplicate(candidate: MemoryRecord): Promise<MemoryRecord | null> {
     await this.ready();
     assertScope(candidate.tenantId, candidate.appId, "findDuplicate");
+    candidate = normalizeRecordSpace(candidate);
 
     // Index probe on memories_dedup_idx: the normalized-text hash is a stored
     // generated column, so this never degrades to a lower(text) scan.
@@ -894,15 +1099,30 @@ export class PostgresMemoryProvider implements MemoryProvider {
       `SELECT ${columnList("m")}
          FROM memories m
         WHERE m.tenant_id = $1
-          AND m.app_id = $2
-          AND m.actor_id = $3
-          AND m.memory_type = $4
+          AND m.scope = $2
+          AND m.memory_type = $3
           AND m.status = 'active'
-          AND m.text_hash = md5(lower(regexp_replace(btrim($5::text), '\\s+', ' ', 'g')))
+          AND m.text_hash = md5(lower(regexp_replace(btrim($4::text), '\\s+', ' ', 'g')))
+          AND (
+            ($2 = 'tenant')
+            OR ($2 = 'workspace' AND m.space_id = $5)
+            OR ($2 = 'app' AND m.space_id = $5 AND m.app_id = $6)
+            OR ($2 = 'actor' AND m.space_id = $5 AND m.actor_id = $7)
+            OR ($2 = 'thread' AND m.space_id = $5 AND m.actor_id = $7 AND m.thread_id IS NOT DISTINCT FROM $8)
+          )
           ${this.hideExpiredOnRead ? `AND NOT ${expiredSql("m")}` : ""}
         ORDER BY m.last_seen_at DESC
         LIMIT 1`,
-      [candidate.tenantId, candidate.appId, candidate.actorId, candidate.memoryType, candidate.text],
+      [
+        candidate.tenantId,
+        candidate.scope,
+        candidate.memoryType,
+        candidate.text,
+        candidate.spaceId,
+        candidate.appId,
+        candidate.actorId,
+        candidate.threadId ?? null,
+      ],
     );
     return result.rows[0] ? mapRow(result.rows[0]) : null;
   }
@@ -927,23 +1147,37 @@ export class PostgresMemoryProvider implements MemoryProvider {
     return result.rows.map(mapRow);
   }
 
+  async listVisible(filters: MemoryFilters, limit = this.maxListRows): Promise<MemoryRecord[]> {
+    await this.ready();
+    const params = new Params();
+    const filter = this.buildFilter("m", filters, params, "listVisible");
+    const limitRef = params.add(Math.min(Math.max(limit, 0), this.maxListRows));
+    const result = await this.pool.query<MemoryRow>(
+      `SELECT ${columnList("m")}
+         FROM memories m
+        WHERE ${filter.sql}
+        ORDER BY m.last_seen_at DESC
+        LIMIT ${limitRef}`,
+      params.values,
+    );
+    return result.rows.map(mapRow);
+  }
+
   /**
    * The MemoryProvider interface carries no tenant on getById, so pass `scope`
    * whenever the caller knows it. An unscoped lookup by opaque id is the one
    * read path this provider cannot tenant-check on the caller's behalf;
    * `requireIdScope: true` refuses it instead of answering.
    */
-  async getById(id: string, scope?: { tenantId: string; appId: string }): Promise<MemoryRecord | null> {
+  async getById(id: string, scope?: MemoryIdScope): Promise<MemoryRecord | null> {
     await this.ready();
-    if (this.requireIdScope) assertScope(scope?.tenantId, scope?.appId, "getById");
+    if (this.requireIdScope) assertIdScope(scope, "getById");
     if (!id) return null;
 
     const params: unknown[] = [id];
     let scopeSql = "";
     if (scope) {
-      assertScope(scope.tenantId, scope.appId, "getById");
-      params.push(scope.tenantId, scope.appId);
-      scopeSql = "AND m.tenant_id = $2 AND m.app_id = $3";
+      scopeSql = idScopeSql("m", scope, params, "getById");
     }
 
     const result = await this.pool.query<MemoryRow>(
@@ -954,6 +1188,33 @@ export class PostgresMemoryProvider implements MemoryProvider {
           ${scopeSql}
           ${this.hideExpiredOnRead ? `AND NOT ${expiredSql("m")}` : ""}
         LIMIT 1`,
+      params,
+    );
+    return result.rows[0] ? mapRow(result.rows[0]) : null;
+  }
+
+  async retire(
+    id: string,
+    status: MemoryRetirementStatus,
+    metadataPatch: Record<string, unknown> | undefined,
+    scope: MemoryIdScope,
+  ): Promise<MemoryRecord | null> {
+    await this.ready();
+    assertIdScope(scope, "retire");
+    if (!id) return null;
+
+    const params: unknown[] = [id, status, JSON.stringify(metadataPatch ?? {})];
+    const scopeSql = idScopeSql("m", scope, params, "retire");
+    const result = await this.pool.query<MemoryRow>(
+      `UPDATE memories m
+          SET status = $2,
+              metadata = (CASE WHEN jsonb_typeof(m.metadata) = 'object'
+                               THEN m.metadata ELSE '{}'::jsonb END) || $3::jsonb,
+              updated_at = now()
+        WHERE m.id = $1
+          AND m.status = 'active'
+          ${scopeSql}
+        RETURNING ${columnList("m")}`,
       params,
     );
     return result.rows[0] ? mapRow(result.rows[0]) : null;
@@ -991,29 +1252,60 @@ export class PostgresMemoryProvider implements MemoryProvider {
 
   async health(): Promise<ProviderHealthStatus> {
     try {
+      // Readiness is read-only. Production startup applies explicitly enabled
+      // migrations before opening the listener; probes never execute DDL.
       const result = await this.pool.query<{
         server_version: string;
         vector_version: string | null;
-        total_rows: string;
-        active_rows: string;
+        memory_table: string | null;
+        memory_space_column: boolean;
+        estimated_rows: string | null;
+        embedding_table: string | null;
+        embedding_space_column: boolean;
       }>(
         `SELECT current_setting('server_version') AS server_version,
                 (SELECT extversion FROM pg_extension WHERE extname = 'vector') AS vector_version,
-                (SELECT count(*) FROM memories) AS total_rows,
-                (SELECT count(*) FROM memories WHERE status = 'active') AS active_rows`,
+                to_regclass('memories')::text AS memory_table,
+                EXISTS (
+                  SELECT 1 FROM pg_attribute
+                   WHERE attrelid = to_regclass('memories')
+                     AND attname = 'space_id' AND attnotnull AND NOT attisdropped
+                ) AS memory_space_column,
+                (SELECT reltuples::bigint::text FROM pg_class WHERE oid = to_regclass('memories')) AS estimated_rows,
+                to_regclass($1)::text AS embedding_table,
+                EXISTS (
+                  SELECT 1 FROM pg_attribute
+                   WHERE attrelid = to_regclass($1)
+                     AND attname = 'space_id' AND attnotnull AND NOT attisdropped
+                ) AS embedding_space_column`,
+        [this.embedder ? `memory_embeddings_${this.embedder.dims}` : "memory_embeddings_384"],
       );
       const row = result.rows[0];
       const needsVector = Boolean(this.embedder);
       const hasVector = Boolean(row?.vector_version);
+      const hasMemoryTable = Boolean(row?.memory_table);
+      const hasCurrentMemorySchema = hasMemoryTable && Boolean(row?.memory_space_column);
+      const hasEmbeddingTable = !needsVector || (
+        Boolean(row?.embedding_table) && Boolean(row?.embedding_space_column)
+      );
       const details = [
         `pg=${row?.server_version}`,
         `pgvector=${row?.vector_version ?? "absent"}`,
-        `rows=${toNumber(row?.total_rows)}`,
-        `active=${toNumber(row?.active_rows)}`,
+        `rows_estimate=${toNumber(row?.estimated_rows)}`,
         `embedder=${needsVector ? `${this.embeddingModel}/${this.embedder?.dims}d` : "none"}`,
+        `vector_search_failures=${this.vectorSearchFailures}`,
       ];
+      if (hasMemoryTable && !hasCurrentMemorySchema) details.push("memory schema outdated: apply migration 002_memory_spaces");
       if (needsVector && !hasVector) details.push("vector search unavailable: run CREATE EXTENSION vector");
-      return { ok: needsVector ? hasVector : true, provider: "postgres", detail: details.join(" ") };
+      if (needsVector && hasVector && !hasEmbeddingTable) {
+        details.push(`vector table unavailable: run SELECT memory_core_ensure_embedding_dim(${this.embedder?.dims})`);
+      }
+      if (!hasMemoryTable) details.push("memories table unavailable: apply migrations");
+      return {
+        ok: hasCurrentMemorySchema && (!needsVector || (hasVector && hasEmbeddingTable)),
+        provider: "postgres",
+        detail: details.join(" "),
+      };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const hint = isMissingRelation(error) ? " (apply migrations/001_init.sql)" : "";

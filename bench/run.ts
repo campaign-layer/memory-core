@@ -43,6 +43,7 @@ interface Args {
   json?: string;
   embedder: EmbedderKind;
   timeAnchor: string;
+  failOnAtOrBelowRandom: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -76,6 +77,7 @@ function parseArgs(argv: string[]): Args {
     json: get("json"),
     embedder,
     timeAnchor: get("time-anchor") ?? defaultTimeAnchor(),
+    failOnAtOrBelowRandom: get("fail-on-at-or-below-random") === "true",
   };
 }
 
@@ -428,6 +430,17 @@ async function main(): Promise<void> {
   mkdirSync(path.dirname(jsonPath), { recursive: true });
   writeFileSync(jsonPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   console.log(`\nJSON: ${path.relative(process.cwd(), jsonPath)}`);
+
+  if (args.failOnAtOrBelowRandom) {
+    const regressions = reports.filter(
+      (report) => report.status === "ok" && report.system !== "random" && report.atOrBelowRandom,
+    );
+    if (regressions.length > 0) {
+      throw new Error(
+        `retrieval quality gate failed at/below random: ${regressions.map((report) => report.system).join(", ")}`,
+      );
+    }
+  }
 }
 
 main().catch((error) => {

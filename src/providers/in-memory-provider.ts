@@ -4,10 +4,19 @@ import type {
   MemoryFeedbackInput,
   MemoryFilters,
   MemoryRecord,
+  MemoryRetirementStatus,
   MemorySearchHit,
   MemorySearchQuery,
 } from "../types.js";
-import { isExpired, normalizeKey, recencyScore } from "../utils.js";
+import { isExpired, recencyScore } from "../utils.js";
+import {
+  memoryDedupeKey,
+  memoryVisibleTo,
+  memoryVisibleToIdScope,
+  normalizeRecordSpace,
+  requireMemoryAccess,
+  sameMemoryOwner,
+} from "../access.js";
 import { BM25Index } from "../retrieval/bm25.js";
 import { cosine } from "../retrieval/embedder.js";
 import { rrf } from "../retrieval/fusion.js";
@@ -30,8 +39,8 @@ const MIN_CANDIDATES = 50;
 //   LoCoMo (n=1,531)    R@1  33.6% -> 34.4%,  R@10 66.6% -> 70.9%
 //
 // The gain is concentrated at R@1 on the synthetic suite and broad-spectrum on
-// LoCoMo, so treat the large R@1 jump as fixture-specific. Override with
-// MEMORY_RRF_K.
+// LoCoMo, so treat the large R@1 jump as fixture-specific. Override through
+// InMemoryProviderOptions.rrfK (the benchmark maps MEMORY_RRF_K into it).
 const DEFAULT_RRF_K = 5;
 
 // Cosine floor for a vector candidate. Without it every stored memory is a
@@ -84,27 +93,8 @@ function indexText(record: MemoryRecord): string {
   return record.summary ? `${record.text} ${record.summary}` : record.text;
 }
 
-function requireScope(filters: MemoryFilters): void {
-  if (!filters?.tenantId || !filters?.appId) {
-    throw new Error("MemoryFilters.tenantId and MemoryFilters.appId are required");
-  }
-}
-
 function matchesFilters(record: MemoryRecord, filters: MemoryFilters): boolean {
-  if (record.tenantId !== filters.tenantId) return false;
-  if (record.appId !== filters.appId) return false;
-  if (filters.actorId && record.actorId !== filters.actorId) return false;
-  if (filters.threadId && record.threadId !== filters.threadId) return false;
-  if (filters.memoryTypes && filters.memoryTypes.length > 0 && !filters.memoryTypes.includes(record.memoryType)) return false;
-  if (filters.scope && filters.scope.length > 0 && !filters.scope.includes(record.scope)) return false;
-
-  if (filters.metadata) {
-    for (const [key, value] of Object.entries(filters.metadata)) {
-      if (record.metadata[key] !== value) return false;
-    }
-  }
-
-  return true;
+  return memoryVisibleTo(record, filters);
 }
 
 // Quality signals in 0..1. These modulate relevance; they never create it.
@@ -129,6 +119,7 @@ function qualityScore(record: MemoryRecord): { quality: number; reasons: string[
 }
 
 export class InMemoryProvider implements MemoryProvider {
+  readonly defaultMinScore = 0.05;
   private readonly records = new Map<string, MemoryRecord>();
   private readonly bm25 = new BM25Index();
   // Exact-duplicate lookup, so dedupe is O(1) instead of a full scan per observation.
@@ -163,7 +154,7 @@ export class InMemoryProvider implements MemoryProvider {
   // JSON-encoded so no delimiter can be forged: a single-char separator lets
   // ("a b","c") collide with ("a","b c"), across tenants.
   private dupKey(record: MemoryRecord): string {
-    return JSON.stringify([record.tenantId, record.appId, record.actorId, record.memoryType, normalizeKey(record.text)]);
+    return memoryDedupeKey(record);
   }
 
   // Only drops the entry if this record actually owns it. Two records can share
@@ -176,14 +167,18 @@ export class InMemoryProvider implements MemoryProvider {
   // Lazy expiry: reads skip expired records instead of scanning the whole store.
   // compact() is the only full sweep and the only thing that flips status.
   private isVisible(record: MemoryRecord, now: number): boolean {
-    return record.status === "active" && !isExpired(record.lastSeenAt, record.decayPolicy, now);
+    return record.status === "active" && !isExpired(record, now);
   }
 
   private index(record: MemoryRecord): void {
+    record = normalizeRecordSpace(record);
     // Re-indexing an existing id must retire its old dupKey, or the stale key
     // keeps resolving to a record whose text has since changed.
     const previous = this.records.get(record.id);
     if (previous) {
+      if (!sameMemoryOwner(previous, record)) {
+        throw new Error(`in-memory-provider: refusing to move existing id ${record.id} to another ownership scope`);
+      }
       this.unindexDupKey(previous);
       // Changed text invalidates the stored vector. Dropping it here is what
       // makes update() re-embed: the next embed pass sees a missing vector.
@@ -319,7 +314,7 @@ export class InMemoryProvider implements MemoryProvider {
   }
 
   async search(query: MemorySearchQuery): Promise<HybridMemorySearchHit[]> {
-    requireScope(query.filters);
+    requireMemoryAccess(query.filters);
     const limit = Math.min(Math.max(query.limit ?? 8, 1), 100);
     const minScore = query.minScore ?? 0.05;
     const now = Date.now();
@@ -477,19 +472,56 @@ export class InMemoryProvider implements MemoryProvider {
     return list;
   }
 
+  async listVisible(filters: MemoryFilters, limit = 1_000): Promise<MemoryRecord[]> {
+    requireMemoryAccess(filters);
+    const now = Date.now();
+    const list: MemoryRecord[] = [];
+    for (const record of this.records.values()) {
+      if (this.isVisible(record, now) && memoryVisibleTo(record, filters)) list.push(record);
+    }
+    list.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+    return list.slice(0, Math.max(0, limit));
+  }
+
   async getById(id: string, scope?: MemoryIdScope): Promise<MemoryRecord | null> {
     const record = this.records.get(id);
     if (!record || !this.isVisible(record, Date.now())) return null;
-    if (scope && (record.tenantId !== scope.tenantId || record.appId !== scope.appId)) return null;
+    if (scope && !memoryVisibleToIdScope(record, scope)) return null;
     return record;
+  }
+
+  async retire(
+    id: string,
+    status: MemoryRetirementStatus,
+    metadataPatch: Record<string, unknown> | undefined,
+    scope: MemoryIdScope,
+  ): Promise<MemoryRecord | null> {
+    const record = this.records.get(id);
+    if (!record || !this.isVisible(record, Date.now()) || !memoryVisibleToIdScope(record, scope)) return null;
+    const retired: MemoryRecord = {
+      ...record,
+      status,
+      metadata: { ...record.metadata, ...(metadataPatch ?? {}) },
+      updatedAt: new Date().toISOString(),
+    };
+    this.index(retired);
+    return retired;
   }
 
   async applyFeedback(feedback: MemoryFeedbackInput): Promise<MemoryRecord | null> {
     const record = this.records.get(feedback.memoryId);
     if (!record || !this.isVisible(record, Date.now())) return null;
-    // Scope is optional on the input; honour it whenever the caller supplies it.
-    if (feedback.tenantId && record.tenantId !== feedback.tenantId) return null;
-    if (feedback.appId && record.appId !== feedback.appId) return null;
+    // Scope is optional for legacy in-process callers. Once any scope field is
+    // supplied, require a tenant and apply the complete visibility policy.
+    if (feedback.tenantId || feedback.spaceId || feedback.appId || feedback.actorId || feedback.accessThreadId) {
+      if (!feedback.tenantId || !memoryVisibleToIdScope(record, {
+        tenantId: feedback.tenantId,
+        spaceId: feedback.spaceId,
+        appId: feedback.appId,
+        actorId: feedback.actorId,
+        accessThreadId: feedback.accessThreadId,
+      })) return null;
+    }
 
     if (feedback.signal === "selected") {
       record.stats.selectedCount += 1;
@@ -514,7 +546,7 @@ export class InMemoryProvider implements MemoryProvider {
     for (const record of this.records.values()) {
       const wasSuperseded = record.status === "superseded";
       if (!wasSuperseded && record.status !== "active") continue;
-      if (!wasSuperseded && !isExpired(record.lastSeenAt, record.decayPolicy, now)) continue;
+      if (!wasSuperseded && !isExpired(record, now)) continue;
 
       record.status = "archived";
       record.updatedAt = new Date(now).toISOString();

@@ -4,11 +4,13 @@ import type {
   MemoryFeedbackInput,
   MemoryFilters,
   MemoryRecord,
+  MemoryRetirementStatus,
   MemorySearchHit,
   MemorySearchQuery,
   MemoryType,
 } from "../types.js";
 import { isExpired, normalizeText, tokenize } from "../utils.js";
+import { memoryDedupeKey, memoryVisibleTo, memoryVisibleToIdScope, normalizeRecordSpace, requireMemoryAccess, sameMemoryOwner } from "../access.js";
 
 // Enhanced memory record with additional metadata
 interface EnhancedMemoryRecord extends MemoryRecord {
@@ -182,6 +184,7 @@ class TemporalExtractor {
 
 // Enhanced provider with semantic and temporal capabilities
 export class EnhancedMemoryProvider implements MemoryProvider {
+  readonly defaultMinScore = 0.05;
   private readonly records = new Map<string, EnhancedMemoryRecord>();
   private readonly embeddingService = new MockEmbeddingService();
   private readonly temporalExtractor = new TemporalExtractor();
@@ -196,7 +199,7 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     const now = Date.now();
     for (const record of this.records.values()) {
       if (record.status !== "active") continue;
-      if (isExpired(record.lastSeenAt, record.decayPolicy, now)) {
+      if (isExpired(record, now)) {
         record.status = "archived";
         record.updatedAt = new Date(now).toISOString();
         this.records.set(record.id, record);
@@ -211,7 +214,12 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     
     // Group records by episode (session)
     const sessionGroups = new Map<string, MemoryRecord[]>();
-    for (const record of records) {
+    for (const rawRecord of records) {
+      const record = normalizeRecordSpace(rawRecord);
+      const existing = this.records.get(record.id);
+      if (existing && !sameMemoryOwner(existing, record)) {
+        throw new Error(`enhanced-provider: refusing to move existing id ${record.id} to another ownership scope`);
+      }
       const sessionKey = `${record.tenantId}:${record.appId}:${record.actorId}:${record.threadId}`;
       if (!sessionGroups.has(sessionKey)) {
         sessionGroups.set(sessionKey, []);
@@ -349,13 +357,10 @@ export class EnhancedMemoryProvider implements MemoryProvider {
 
   async findDuplicate(candidate: MemoryRecord): Promise<MemoryRecord | null> {
     this.pruneExpired();
+    const key = memoryDedupeKey(candidate);
     for (const record of this.records.values()) {
       if (
-        record.tenantId === candidate.tenantId &&
-        record.appId === candidate.appId &&
-        record.actorId === candidate.actorId &&
-        record.memoryType === candidate.memoryType &&
-        record.text.toLowerCase() === candidate.text.toLowerCase() &&
+        memoryDedupeKey(record) === key &&
         record.status === "active"
       ) {
         return record;
@@ -367,6 +372,9 @@ export class EnhancedMemoryProvider implements MemoryProvider {
   async update(record: MemoryRecord): Promise<MemoryRecord> {
     const existing = this.records.get(record.id);
     if (existing) {
+      if (!sameMemoryOwner(existing, record)) {
+        throw new Error(`enhanced-provider: refusing to move existing id ${record.id} to another ownership scope`);
+      }
       const updated = { ...existing, ...record };
       this.records.set(record.id, updated);
       return updated;
@@ -424,6 +432,7 @@ export class EnhancedMemoryProvider implements MemoryProvider {
   }
 
   async search(query: MemorySearchQuery): Promise<MemorySearchHit[]> {
+    requireMemoryAccess(query.filters);
     this.pruneExpired();
     const limit = Math.min(Math.max(query.limit ?? 20, 1), 100); // Increased default limit
     const minScore = query.minScore ?? 0.05; // Lowered threshold for better recall
@@ -478,20 +487,7 @@ export class EnhancedMemoryProvider implements MemoryProvider {
   }
 
   private matchesFilters(record: EnhancedMemoryRecord, filters: MemoryFilters): boolean {
-    if (record.tenantId !== filters.tenantId) return false;
-    if (record.appId !== filters.appId) return false;
-    if (filters.actorId && record.actorId !== filters.actorId) return false;
-    if (filters.threadId && record.threadId !== filters.threadId) return false;
-    if (filters.memoryTypes && filters.memoryTypes.length > 0 && !filters.memoryTypes.includes(record.memoryType)) return false;
-    if (filters.scope && filters.scope.length > 0 && !filters.scope.includes(record.scope)) return false;
-
-    if (filters.metadata) {
-      for (const [key, value] of Object.entries(filters.metadata)) {
-        if (record.metadata[key] !== value) return false;
-      }
-    }
-
-    return true;
+    return memoryVisibleTo(record, filters);
   }
 
   private async computeEnhancedScore(
@@ -609,21 +605,55 @@ export class EnhancedMemoryProvider implements MemoryProvider {
     return list;
   }
 
+  async listVisible(filters: MemoryFilters, limit = 1_000): Promise<MemoryRecord[]> {
+    requireMemoryAccess(filters);
+    this.pruneExpired();
+    return [...this.records.values()]
+      .filter((record) => record.status === "active" && memoryVisibleTo(record, filters))
+      .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
+      .slice(0, Math.max(0, limit));
+  }
+
   async getById(id: string, scope?: MemoryIdScope): Promise<MemoryRecord | null> {
     this.pruneExpired();
     const record = this.records.get(id);
     if (!record || record.status !== "active") return null;
-    if (scope && (record.tenantId !== scope.tenantId || record.appId !== scope.appId)) return null;
+    if (scope && !memoryVisibleToIdScope(record, scope)) return null;
     return record;
+  }
+
+  async retire(
+    id: string,
+    status: MemoryRetirementStatus,
+    metadataPatch: Record<string, unknown> | undefined,
+    scope: MemoryIdScope,
+  ): Promise<MemoryRecord | null> {
+    this.pruneExpired();
+    const record = this.records.get(id);
+    if (!record || record.status !== "active" || !memoryVisibleToIdScope(record, scope)) return null;
+    const retired: MemoryRecord = {
+      ...record,
+      status,
+      metadata: { ...record.metadata, ...(metadataPatch ?? {}) },
+      updatedAt: new Date().toISOString(),
+    };
+    this.records.set(id, retired as EnhancedMemoryRecord);
+    return retired;
   }
 
   async applyFeedback(feedback: MemoryFeedbackInput): Promise<MemoryRecord | null> {
     this.pruneExpired();
     const record = this.records.get(feedback.memoryId);
     if (!record || record.status !== "active") return null;
-    // Scope is optional on the input; honour it whenever the caller supplies it.
-    if (feedback.tenantId && record.tenantId !== feedback.tenantId) return null;
-    if (feedback.appId && record.appId !== feedback.appId) return null;
+    if (feedback.tenantId || feedback.spaceId || feedback.appId || feedback.actorId || feedback.accessThreadId) {
+      if (!feedback.tenantId || !memoryVisibleToIdScope(record, {
+        tenantId: feedback.tenantId,
+        spaceId: feedback.spaceId,
+        appId: feedback.appId,
+        actorId: feedback.actorId,
+        accessThreadId: feedback.accessThreadId,
+      })) return null;
+    }
 
     if (feedback.signal === "selected") {
       record.stats.selectedCount += 1;

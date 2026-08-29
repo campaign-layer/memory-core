@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "reviewSet": "initial-pre-fix",
+  "repository": "campaign-layer/memory-core",
+  "snapshot": {
+    "path": "/private/tmp/memory-core-claude-opus-ZsZOGQ",
+    "fileCount": 79,
+    "manifestFile": "source-manifest.sha256",
+    "manifestSha256": "303f9ef5faf99e1ecf4686331ea03f5835645b087ecd5f90a8fe3f945b172ecc",
+    "excluded": [
+      ".env*",
+      ".git",
+      "node_modules",
+      "generated benchmark datasets/results"
+    ]
+  },
+  "acceptanceCriteriaSha256": "0ee4b8999f7ad2da651893e1d9dcd405a2a299d6e442e51eac608eed00bd0b25",
+  "startedAt": "2026-08-29T07:12:23.812Z",
+  "completedAt": "2026-08-29T07:27:45.331Z",
+  "cli": {
+    "package": "@anthropic-ai/claude-code",
+    "version": "2.1.251",
+    "requestedModel": "opus",
+    "actualModel": "claude-opus-5",
+    "provider": "firstParty",
+    "node": "22.14.0"
+  },
+  "isolation": {
+    "permissionMode": "plan",
+    "restricted": true,
+    "safeMode": true,
+    "strictMcpConfig": true,
+    "noSessionPersistence": true,
+    "toolsAllowed": [
+      "Read",
+      "Glob",
+      "Grep"
+    ],
+    "toolsDisallowed": [
+      "Bash",
+      "Edit",
+      "Write",
+      "WebFetch",
+      "WebSearch",
+      "Task"
+    ],
+    "mcpServers": [],
+    "permissionDenials": [],
+    "webSearchRequests": 0
+  },
+  "reviews": [
+    {
+      "role": "architecture",
+      "mode": "independent frozen-snapshot review",
+      "promptSha256": "47943667ce0799ca65cce1b5d5e8df188743f624009e55d095e1b28e28e28fc6",
+      "sessionId": "400DC3CE-2508-4BBD-BB04-62D26903FE51",
+      "exitCode": 0,
+      "durationMs": 722311,
+      "numTurns": 54,
+      "verdict": "BLOCK",
+      "rawFile": "architect.raw.json",
+      "rawSha256": "c58dc12179579c22a1f62c5a10f549955476af83476486e1c2ec4ac75dcc80af",
+      "permissionDenials": [],
+      "webSearchRequests": 0
+    },
+    {
+      "role": "adversarial code and production review",
+      "mode": "independent frozen-snapshot review",
+      "promptSha256": "f644c098bc2fcdf84eabcb58fa938c4983b7342df6fc57e356fce8d31694910b",
+      "sessionId": "0E901B42-365C-4ED9-BDF5-537C3426BF2B",
+      "exitCode": 0,
+      "durationMs": 921519,
+      "numTurns": 59,
+      "verdict": "BLOCK",
+      "rawFile": "adversary.raw.json",
+      "rawSha256": "deb42e66ff28e5223e9b406546c23c94041ca659f5740310cf89db38fbcdd2f4",
+      "permissionDenials": [],
+      "webSearchRequests": 0
+    }
+  ],
+  "disposition": "Historical review of the pre-fix snapshot. Confirmed findings were fixed in the working tree; this BLOCK verdict is not a post-fix clearance."
+}

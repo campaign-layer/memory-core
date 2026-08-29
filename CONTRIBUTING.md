@@ -13,7 +13,8 @@ npm install
 npm run dev        # http://localhost:7401
 ```
 
-Node 18+ is required; CI runs 20 and 22.
+Node 20+ is required; CI runs 20 and 22. This matches the engine floor of the MCP server's
+installed Node transport dependency.
 
 ## Checks
 
@@ -21,6 +22,7 @@ Run these before opening a pull request.
 
 ```bash
 npm run typecheck   # tsc --noEmit. Must pass.
+npm run bench:typecheck # bench and imported runtime code. Must pass.
 npm test            # node:test. Must pass, with 1 skipped (ONNX, opt-in below).
 npm run build       # tsc -> dist/. Must pass.
 ```
@@ -40,11 +42,8 @@ docker run -d --name mc-pg -p 5432:5432 \
 MEMORY_PG_URL=postgres://postgres:memory@localhost:5432/memory_core npm run test:pg
 ```
 
-`npm run bench:typecheck` currently **fails**, with every error in `src/**`. `bench/tsconfig.json` sets
-`noUncheckedIndexedAccess: true` and includes `../src/**/*.ts`, which the root
-`tsconfig.json` does not, so the errors are pre-existing `src` code surfaced by the stricter
-flag. The bench harness itself is clean. Fixing this is a welcome contribution; do not treat
-it as a regression you caused.
+`npm run bench:typecheck` uses the same strict indexed-access semantics as the root build and
+also includes every benchmark harness. CI gates both typechecks.
 
 ## Benchmarks
 
@@ -103,8 +102,9 @@ score, and these rules exist so that cannot recur.
    `createMemoryProvider`.
 3. Add the kind to `PROVIDER_KINDS` in `src/config.ts`. The `satisfies` + `AssertNever` pair
    there makes the build fail if you forget.
-4. **Enforce `tenantId` and `appId` on every read.** Throw on an unscoped query; never return
-   everything. One missed check is a cross-tenant leak.
+4. **Enforce the access policy in `src/access.ts`.** Queries require `tenantId` and `appId`;
+   visibility then follows tenant/space/scope/app/actor/thread. Opaque-id reads and mutations
+   must take a caller scope too. One missed check is a cross-tenant or cross-actor leak.
 5. Register it in `bench/systems/index.ts` and run the harness before and after, including
    the `random` control. No retrieval claim ships without that.
 6. Document the storage model and the scoring formula in
@@ -126,8 +126,8 @@ score, and these rules exist so that cannot recur.
 
 - **Write path** — `MemoryCoreService.ingest`: normalize → `findDuplicate` (exact normalized
   text) → insert or merge. That is the whole resolution stage today.
-- **Read path** — `search`: hard filters (tenant, app, actor, thread, type, scope, metadata)
-  → provider ranking → `minScore` gate → sort → slice.
+- **Read path** — `search`: authorization (tenant, space, scope, app, actor, access thread),
+  then hard filters (source thread, type, metadata) → ranking → `minScore` → sort → slice.
 - **Context** — `buildContext`: `search` → greedy selection under a character budget →
   prepend a profile summary.
 
@@ -149,6 +149,6 @@ patch that entrenches the current shape is harder to accept than one that moves 
 ## Reporting a security issue
 
 Do not open a public issue for a vulnerability. Note the known limitations first — API keys
-are not scoped to a tenant, the rate limiter is per-process, there is no CORS policy and no
-security headers, and key comparison is not constant-time. These are documented in
+are not scoped to a tenant, the rate limiter is per-process, there is no CORS policy or TLS,
+and there is no access audit log or online key rotation. These are documented in
 [`docs/deployment.md`](docs/deployment.md#limits-to-know-before-you-deploy) and are not news.

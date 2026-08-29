@@ -45,14 +45,22 @@ test("an agent cannot reach another tenant's memory by id", async () => {
   }
 
   // The victim's record must be untouched on every axis.
-  const survivor = await provider.getById(victimId, { tenantId: "victim-co", appId: "app" });
+  const survivor = await provider.getById(victimId, {
+    tenantId: "victim-co",
+    appId: "app",
+    actorId: "victim_user",
+  });
   assert.ok(survivor, "victim memory must still exist");
   assert.equal(survivor.status, "active", "victim memory must not have been archived");
   assert.equal(survivor.text, "Victim ships on Fridays", "victim memory text must be unchanged");
   assert.equal(survivor.stats.negativeCount, 0, "victim memory must not have been downranked");
 
   // The attacker must not be able to read it either.
-  assert.equal(await provider.getById(victimId, { tenantId: "attacker-co", appId: "app" }), null);
+  assert.equal(await provider.getById(victimId, {
+    tenantId: "attacker-co",
+    appId: "app",
+    actorId: "attacker_user",
+  }), null);
 
   // And the victim can still reach its own memory through the tool surface.
   const recalled = await dispatch("recall", { query: "ships on Fridays" }, victim);
@@ -81,4 +89,84 @@ test("the owning tenant can still forget and supersede its own memory", async ()
   const gone = await dispatch("forget", { memoryId: bId, reason: "wrong" }, ctx);
   assert.equal(gone.ok, true, gone.text);
   assert.equal(await provider.getById(bId, { tenantId: "acme", appId: "app" }), null);
+});
+
+test("an actor cannot mutate another actor's private memory inside a shared space", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const backend = createEmbeddedBackend(service, provider);
+  const shared = { tenantId: "acme", spaceId: "platform-team", appId: "codex" };
+  const alice: MemoryToolContext = {
+    backend,
+    identity: { ...shared, actorId: "alice" },
+    sourceType: "unit-test",
+  };
+  const bob: MemoryToolContext = {
+    backend,
+    identity: { ...shared, actorId: "bob" },
+    sourceType: "unit-test",
+  };
+
+  const stored = await dispatch("remember", {
+    text: "Alice keeps her signing key in the hardware enclave",
+    type: "fact",
+    scope: "actor",
+  }, alice);
+  const memoryId = (stored.data as { id: string }).id;
+
+  for (const [name, result] of [
+    ["forget", await dispatch("forget", { memoryId }, bob)],
+    ["supersede", await dispatch("supersede", { memoryId, newText: "Alice uses a text file" }, bob)],
+    ["feedback", await dispatch("feedback", { memoryId, signal: "not_useful" }, bob)],
+  ] as const) {
+    assert.equal(result.ok, false, `${name} must respect actor scope inside a shared space`);
+  }
+
+  const survivor = await provider.getById(memoryId, {
+    ...shared,
+    actorId: "alice",
+  });
+  assert.ok(survivor);
+  assert.equal(survivor.status, "active");
+  assert.equal(survivor.stats.negativeCount, 0);
+  assert.equal(await provider.getById(memoryId, { ...shared, actorId: "bob" }), null);
+});
+
+test("thread-scoped ids require the caller's current thread", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const backend = createEmbeddedBackend(service, provider);
+  const base = { tenantId: "acme", spaceId: "alice", appId: "codex", actorId: "alice" };
+  const writer: MemoryToolContext = {
+    backend,
+    identity: { ...base, threadId: "release-42" },
+    sourceType: "unit-test",
+  };
+  const otherThread: MemoryToolContext = {
+    backend,
+    identity: { ...base, threadId: "release-43" },
+    sourceType: "unit-test",
+  };
+
+  const stored = await dispatch("remember", {
+    text: "This rollout uses the temporary amber canary",
+    type: "fact",
+    scope: "thread",
+  }, writer);
+  const memoryId = (stored.data as { id: string }).id;
+
+  const refused = await dispatch("feedback", { memoryId, signal: "not_useful" }, otherThread);
+  assert.equal(refused.ok, false);
+  assert.equal(await provider.getById(memoryId, {
+    ...base,
+    accessThreadId: "release-43",
+  }), null);
+
+  const accepted = await dispatch("feedback", { memoryId, signal: "useful" }, writer);
+  assert.equal(accepted.ok, true, accepted.text);
+  const visible = await provider.getById(memoryId, {
+    ...base,
+    accessThreadId: "release-42",
+  });
+  assert.equal(visible?.stats.positiveCount, 1);
 });

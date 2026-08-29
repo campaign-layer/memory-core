@@ -4,7 +4,9 @@ import type { MemoryIdScope, MemoryProvider } from "../provider.js";
 import type {
   MemoryCompactResult,
   MemoryFeedbackInput,
+  MemoryFilters,
   MemoryRecord,
+  MemoryRetirementStatus,
   MemorySearchHit,
   MemorySearchQuery,
 } from "../types.js";
@@ -33,6 +35,7 @@ export type FileProviderOptions = InMemoryProviderOptions;
  * not blocked: search is BM25-only for the first moments after boot.
  */
 export class FileProvider implements MemoryProvider {
+  readonly defaultMinScore = 0.05;
   private readonly inner: InMemoryProvider;
   private loading: Promise<void> | null = null;
   private pendingPersist: Promise<void> | null = null;
@@ -177,9 +180,26 @@ export class FileProvider implements MemoryProvider {
     return this.inner.listByActor(tenantId, appId, actorId);
   }
 
+  async listVisible(filters: MemoryFilters, limit?: number): Promise<MemoryRecord[]> {
+    await this.ensureLoaded();
+    return this.inner.listVisible(filters, limit);
+  }
+
   async getById(id: string, scope?: MemoryIdScope): Promise<MemoryRecord | null> {
     await this.ensureLoaded();
     return this.inner.getById(id, scope);
+  }
+
+  async retire(
+    id: string,
+    status: MemoryRetirementStatus,
+    metadataPatch: Record<string, unknown> | undefined,
+    scope: MemoryIdScope,
+  ): Promise<MemoryRecord | null> {
+    await this.ensureLoaded();
+    const retired = await this.inner.retire(id, status, metadataPatch, scope);
+    if (retired) await this.queuePersist();
+    return retired;
   }
 
   async applyFeedback(feedback: MemoryFeedbackInput): Promise<MemoryRecord | null> {

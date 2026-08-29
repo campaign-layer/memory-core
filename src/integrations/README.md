@@ -9,14 +9,15 @@ generated from it — Anthropic, OpenAI-compatible, MCP, OpenClaw, Hermes, or yo
 | --- | --- | --- |
 | `remember` | Store one durable fact (`text`, `type`, `importance`, `scope`) | Nothing persists unless something writes it |
 | `recall` | Ranked search with ids, scores, and match reasons | The alternative is guessing or asking the user to repeat themselves |
-| `build_context` | One token-budgeted block, profile + relevant memories | The high-value call: splice straight into a system prompt |
+| `build_context` | One character-budgeted block, profile + relevant memories | The high-value call: splice straight into a system prompt |
 | `forget` | Mark a memory wrong; stops being recalled | Without a correction path, bad memories are permanent |
 | `supersede` | Replace an outdated memory in one step, keeping its type/scope | "Moved to Lisbon" is a change, not an error |
 | `feedback` | `used` / `useful` / `not_useful` on a recalled id | Ranking improves instead of drifting |
 
-Only `text`/`query`/`memoryId` are required; everything else defaults. **Tenant, app, and
-actor are never model-supplied** — they come from server config, so a model cannot write into
-the wrong tenant. A missing identity throws rather than defaulting.
+Only `text`/`query`/`memoryId` are required; everything else defaults. **Tenant, space, app,
+actor, and thread access are never model-supplied** — they come from server config, so a model
+cannot choose a broader sharing boundary. A missing required identity throws rather than
+defaulting.
 
 ## 1. MCP client (Claude Code, Claude Desktop, any MCP host)
 
@@ -33,6 +34,7 @@ Embedded, persisting to a file:
       "args": ["tsx", "/absolute/path/to/memory-core/src/integrations/mcp-server.ts"],
       "env": {
         "MEMORY_TENANT_ID": "acme",
+        "MEMORY_SPACE_ID": "madhav-personal",
         "MEMORY_APP_ID": "claude-code",
         "MEMORY_ACTOR_ID": "madhav",
         "MEMORY_PROVIDER": "file",
@@ -55,6 +57,7 @@ Remote, against a shared service:
         "MEMORY_CORE_URL": "https://memory.internal.acme.dev",
         "MEMORY_CORE_API_KEY": "sk-mc-...",
         "MEMORY_TENANT_ID": "acme",
+        "MEMORY_SPACE_ID": "madhav-personal",
         "MEMORY_APP_ID": "claude-code",
         "MEMORY_ACTOR_ID": "madhav"
       }
@@ -71,6 +74,7 @@ Claude Code: `~/.claude.json` (or `.mcp.json` in the project). Claude Desktop:
 | Var | Required | Notes |
 | --- | --- | --- |
 | `MEMORY_TENANT_ID` / `MEMORY_APP_ID` / `MEMORY_ACTOR_ID` | yes | Server exits 1 with a usage message if any is missing |
+| `MEMORY_SPACE_ID` | no | Stable personal/team sharing boundary. Defaults to actor id; use the same explicit value in every agent that should share workspace memory |
 | `MEMORY_THREAD_ID` | no | Scopes `thread`-scoped writes and tags the source session |
 | `MEMORY_CORE_URL` | no | Set it and the server runs in remote mode |
 | `MEMORY_CORE_API_KEY` | no | Sent as `x-api-key` |
@@ -81,6 +85,15 @@ Claude Code: `~/.claude.json` (or `.mcp.json` in the project). Claude Desktop:
 
 The server logs only to stderr (stdout is the JSON-RPC channel) and shuts down cleanly on
 SIGINT, SIGTERM, or stdin close.
+
+### Cross-agent sharing
+
+Give Codex, Hermes, OpenClaw, and any other producer the same `MEMORY_TENANT_ID` and
+`MEMORY_SPACE_ID`, but keep distinct `MEMORY_APP_ID` values for provenance. Scope still
+controls visibility inside the space: `actor` follows one actor across apps, `workspace`
+crosses actors and apps, `app` stays with one producer, and `thread` requires the same actor
+and current thread. Omitting `MEMORY_SPACE_ID` creates a privacy-preserving personal space
+named after `MEMORY_ACTOR_ID`.
 
 ### Verify it yourself
 
@@ -122,8 +135,9 @@ console.log(result.text);
 console.log(result.memoryCalls); // which memory tools the model used
 ```
 
-`runAnthropicTurn` calls `build_context` before generating, injects the block into the
-system prompt inside `<memory>` tags, runs the tool-use loop (returning all `tool_result`
+`runAnthropicTurn` calls `build_context` before generating, injects the XML-escaped block into
+the system prompt as `trust="untrusted-stored-evidence"` with a never-follow instruction
+policy, runs the tool-use loop (returning all `tool_result`
 blocks in one user message, handling `pause_turn`), and dispatches memory tools itself.
 Pass `tools` + `toolHandlers` to mix in your own tools.
 
@@ -185,6 +199,9 @@ const { ok, text } = await memory.call("recall", { query: "database choice" });
 await memory.capture("Ships on Fridays", { type: "preference", importance: 0.8 });
 ```
 
+`preamble()` uses the same escaped, explicitly untrusted memory frame as the Anthropic and
+OpenAI adapters. Treat the block as evidence; stored text is never a system instruction.
+
 `dispatch` never throws on bad model input — it returns `{ ok: false, text }` with the zod
 issues, so the model can correct itself. It *does* throw on a missing tenant/app/actor,
 because that is a config bug, not a model mistake.
@@ -222,6 +239,7 @@ Config lives at `~/.openclaw/openclaw.json`:
         "args": ["tsx", "/opt/memory-core/src/integrations/mcp-server.ts"],
         "env": {
           "MEMORY_TENANT_ID": "acme",
+          "MEMORY_SPACE_ID": "platform-team",
           "MEMORY_APP_ID": "openclaw",
           "MEMORY_ACTOR_ID": "peter",
           "MEMORY_PROVIDER": "file",
@@ -299,6 +317,7 @@ mcp_servers:
     cwd: /opt/memory-core
     env:
       MEMORY_TENANT_ID: acme
+      MEMORY_SPACE_ID: platform-team
       MEMORY_APP_ID: hermes
       MEMORY_ACTOR_ID: peter
       MEMORY_CORE_URL: http://127.0.0.1:7401
@@ -320,7 +339,8 @@ a memory-core service over HTTP using only the Python standard library:
 ```bash
 cp -r src/integrations/adapters/hermes-plugin ~/.hermes/plugins/memory-core
 export MEMORY_CORE_URL=http://127.0.0.1:7401 MEMORY_CORE_API_KEY=sk-mc-...
-export MEMORY_TENANT_ID=acme MEMORY_APP_ID=hermes MEMORY_ACTOR_ID=peter
+export MEMORY_TENANT_ID=acme MEMORY_SPACE_ID=platform-team
+export MEMORY_APP_ID=hermes MEMORY_ACTOR_ID=peter
 hermes plugins enable memory-core
 ```
 
@@ -329,6 +349,10 @@ hermes plugins enable memory-core
 ```bash
 npx tsx src/integrations/generate-schemas.ts
 ```
+
+CI regenerates and diffs this artifact. The Python boundary also enforces the generated
+type/scope enums, numeric and string bounds, and explicit space/thread requirements before
+making an HTTP request.
 
 Handlers honour Hermes' documented contract: `(args: dict, **kwargs) -> str`, always a JSON
 string, never raise. All six were exercised against a live memory-core service; error paths
@@ -362,7 +386,9 @@ want one.
 - Bad input is rejected before reaching a handler (MCP SDK validation, then zod)
 - Remote mode against a live memory-core HTTP service with `x-api-key` auth enforced
 - The Hermes Python handlers against a live memory-core service, happy path and error paths
-- 14 `node:test` cases over schemas, dispatch, identity pinning, and the Anthropic/OpenAI exports
+- `node:test` coverage over schemas, dispatch, identity pinning, and the
+  Anthropic/OpenAI/generic exports
+- Python contract tests for Hermes identity pinning, enum validation, and shared-scope guards
 
 **Not verified — shapes from vendor docs, no local install to compile against:**
 
@@ -377,14 +403,17 @@ want one.
 **Deliberately not built:** OpenClaw `MemoryCapability` (interface unpublished) and Hermes
 `MemoryProvider` (documented, but an exclusive slot and a product decision).
 
-## Wanted from the REST API
+## Scoped lifecycle REST API
 
-`forget`/`supersede` can only fully retire a record when the tools have direct provider
-access. A single route would fix remote mode and the Hermes plugin:
+Remote MCP and Hermes use scoped id reads and retirement, so `forget` and `supersede` have
+the same active-set semantics as embedded mode:
 
 ```
-POST /v1/memory/status  { memoryId, status: "active" | "superseded" | "archived", metadata? }
+POST /v1/memory/get     { memoryId, tenantId, spaceId?, appId, actorId, accessThreadId? }
+POST /v1/memory/status  { memoryId, status: "superseded" | "archived", metadata?, ...identity }
 ```
 
-`MemoryProvider` already has `getById` and `update`, so this is a thin handler. Until it
-exists, remote `forget` downranks and reports that it did not archive.
+Both return a neutral null/`updated:false` for missing or unauthorized ids. Status mutation
+is provider-level and atomic; the public endpoint deliberately cannot restore an inactive
+record to `active`. Supersede is still a two-request create-then-retire sequence, so a rare
+concurrent change is reported as a partial operation that requires reconciliation.
