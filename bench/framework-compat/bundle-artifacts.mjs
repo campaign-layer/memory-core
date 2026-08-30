@@ -36,6 +36,12 @@ const ALLOWED_TOP_LEVEL_FILES = new Set([
   "principals.sanitized.json",
   "requests.ndjson",
   "resources.ndjson",
+  "runtime-autogen-freeze.txt",
+  "runtime-crewai-freeze.txt",
+  "runtime-framework-npm.json",
+  "runtime-hermes-freeze.txt",
+  "runtime-node-version.txt",
+  "runtime-root-npm.json",
   "soak.stderr.log",
   "soak.stdout.log",
   "summary.json",
@@ -56,6 +62,12 @@ const REQUIRED_EVIDENCE = [
   "principals.sanitized.json",
   "requests.ndjson",
   "resources.ndjson",
+  "runtime-autogen-freeze.txt",
+  "runtime-crewai-freeze.txt",
+  "runtime-framework-npm.json",
+  "runtime-hermes-freeze.txt",
+  "runtime-node-version.txt",
+  "runtime-root-npm.json",
   "soak.stderr.log",
   "soak.stdout.log",
   "summary.json",
@@ -249,6 +261,35 @@ async function collectEvidence(runDirectory) {
     await walk(probesRoot, "framework-probes", 1);
   }
 
+  const transcriptsRoot = path.join(runDirectory, "cli-transcripts");
+  const transcriptsMetadata = await pathMetadata(transcriptsRoot);
+  if (transcriptsMetadata) {
+    if (!transcriptsMetadata.isDirectory() || transcriptsMetadata.isSymbolicLink()) {
+      throw new Error("cli-transcripts must be a real directory");
+    }
+    async function walk(directory, relativeDirectory, depth) {
+      if (depth > 3) throw new Error("cli-transcripts exceeds the allowed directory depth");
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (!/^[A-Za-z0-9._-]+$/.test(entry.name)) {
+          throw new Error("cli-transcripts contains an unsafe path component");
+        }
+        const relative = path.join(relativeDirectory, entry.name);
+        const child = path.join(directory, entry.name);
+        if (entry.isSymbolicLink()) throw new Error(`cli-transcripts contains a symbolic link: ${relative}`);
+        if (entry.isDirectory()) {
+          await walk(child, relative, depth + 1);
+        } else if (entry.isFile() && entry.name.endsWith(".log")) {
+          add(relative, await lstat(child));
+        } else if (entry.isFile()) {
+          ignoredFileCount += 1;
+        } else {
+          throw new Error(`cli-transcripts contains a special file: ${relative}`);
+        }
+      }
+    }
+    await walk(transcriptsRoot, "cli-transcripts", 1);
+  }
+
   for (const required of REQUIRED_EVIDENCE) {
     if (!metadata.has(required)) throw new Error(`required evidence is missing: ${required}`);
   }
@@ -257,6 +298,14 @@ async function collectEvidence(runDirectory) {
     && relative.endsWith(`${path.sep}summary.json`)
   ))) {
     throw new Error("required framework probe summary evidence is missing");
+  }
+  for (const host of ["claude-code", "codex-cli", "hermes", "openclaw"]) {
+    if (!files.some((relative) => (
+      relative.startsWith(`cli-transcripts${path.sep}`)
+      && path.basename(relative) === `${host}.log`
+    ))) {
+      throw new Error(`required redacted CLI transcript is missing: ${host}`);
+    }
   }
   files.sort();
   return { files, metadata, ignoredFileCount, totalBytes };

@@ -218,8 +218,9 @@ a sustained unexpected error rate also stops load while preserving evidence.
 
 ## Artifacts and interpretation
 
-Each run directory contains a sanitized manifest, locked versions, framework
-probe transcripts, request/oracle/fault/resource NDJSON, heartbeats, latency
+Each run directory contains a sanitized manifest, locked Node/Python package
+inventories, framework probe results and redacted CLI host transcripts,
+request/oracle/fault/resource NDJSON, heartbeats, latency
 percentiles, final database counts, Compose image IDs, and service/database
 logs. The live directory also contains credentials and must never be shared.
 Create the fail-closed review bundle instead:
@@ -230,7 +231,8 @@ node bench/framework-compat/bundle-artifacts.mjs \
   --output "$RUN_DIR.review-bundle"
 ```
 
-The exporter allowlists evidence, excludes `run.env`, `cli-state`, and
+The exporter allowlists evidence, includes the locked runtime inventories and
+redacted host transcripts, excludes `run.env`, `cli-state`, and
 `framework-home`, then scans every copied file for all principal keys and the
 Postgres credentials before publishing a checksum manifest. A failed scan
 deletes no source evidence and produces no valid bundle.
