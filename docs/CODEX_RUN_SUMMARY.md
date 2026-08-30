@@ -429,3 +429,93 @@ run the full local validation matrix, and prepare the branch for GitHub and Code
 - The authenticated Codex Cloud CLI has no environment for `campaign-layer/memory-core`.
   No task was submitted to an unrelated repository; create/connect that environment or supply
   its environment id before handing this branch to Cloud.
+
+## Run: 2026-08-30 15:31 (IST)
+
+### Scope
+
+Prepare the hardened branch for an honest Product Hunt public-beta launch: provide a short,
+reproducible Postgres + pgvector path that demonstrates isolated cross-app memory sharing,
+make that exact topology a release gate, remove the remaining default-graph dependency alert,
+and separate verified beta readiness from production/SOTA claims.
+
+### Changes
+
+- Added a checked-in Compose stack with Postgres + pgvector, persistent storage, a
+  loopback-only host port, and three exact principal grants labelled Claude, Codex, and
+  Hermes. The public credentials are explicitly local-demo only.
+- Added a dependency-free Node 20+ demo. It proves one credential cannot impersonate another,
+  Claude's principal can write actor-scoped evidence, Codex's principal can recall it across
+  producer apps, and Hermes's principal receives it in bounded prompt context.
+- Bounded readiness to one 60-second operation, bounded each probe to two seconds, retained
+  the final diagnostic, and rejected unsupported Node versions immediately.
+- Changed the container CI lane from a separate host-network smoke to the exact documented
+  Compose bridge topology. CI builds the production image, verifies optional ONNX is absent,
+  starts the database and service in dependency order, runs the demo, captures logs, and
+  always removes containers, network, and test volume.
+- Marked the project as public beta in the README and documented what the demo does and does
+  not prove. It exercises the integration identity boundary; it does not launch third-party
+  Claude, Codex, or Hermes products.
+- Updated `tsx` to 4.23.13 / esbuild 0.28.2. This removes the remaining development-only
+  esbuild advisory. The already-updated branch also carries patched body-parser 2.3.0 and
+  qs 6.15.3, which are still reported only against the unmerged default branch.
+
+### How It Works Now
+
+1. `docker compose up --build -d` builds memory-core and starts pgvector Postgres behind a
+   private Compose network; only memory-core port 7401 is published, on host loopback.
+2. Postgres must become healthy before memory-core starts. The local stack applies ordered,
+   checksummed migrations and exposes provider-aware readiness.
+3. `node examples/shared-agent-demo.mjs` first sends a deliberate cross-app impersonation and
+   requires HTTP 403. It then writes, recalls, and assembles context with three distinct keys
+   sharing the same tenant/space/actor coordinate.
+4. GitHub runs that same path on every push/PR alongside Node 20/22, Postgres+pgvector,
+   retrieval/context benchmarks, MCP lifecycle, and Hermes contract gates.
+
+### Files Touched
+
+- `docker-compose.yml` — executable local public-beta topology and bounded demo principals.
+- `examples/shared-agent-demo.mjs` — negative authorization plus cross-app write/recall/context
+  proof.
+- `.github/workflows/ci.yml` — exact Compose end-to-end release gate and cleanup.
+- `README.md`, `docs/deployment.md` — beta positioning, runnable commands, and production
+  distinctions.
+- `package.json`, `package-lock.json` — demo command and patched development runner.
+- `docs/CODEX_RUN_SUMMARY.md` — this handoff entry.
+
+### Validation
+
+- Node 20 and Node 22 each report 180 outcomes: 179 passed, one explicitly opt-in ONNX test
+  skipped, zero failed. Application/benchmark typechecks, production build, demo syntax,
+  Compose config, and `git diff --check` pass.
+- `npm audit --omit=optional` and `npm audit --omit=dev --omit=optional` each report zero
+  vulnerabilities. The optional local-ONNX dependency graph remains excluded from release.
+- GitHub CI run `33305397506` passed all five jobs at commit `84c745d`: Node 20, Node 22,
+  deterministic benchmarks, Postgres + pgvector, and the exact production-image Compose
+  demo. The container log records Postgres readiness, the expected 403, one created record,
+  cross-app recall at score 0.922, Hermes context inclusion, and complete cleanup.
+- An independent launch review initially returned no-go because CI tested a different Docker
+  topology. After the workflow and claims were corrected, its focused re-review returned GO
+  with no merge blocker.
+- The production image built locally and its runtime dependency stage audited clean. The
+  existing Colima VM then reproduced its containerd metadata I/O corruption while creating a
+  database container; clean GitHub infrastructure passed the exact path, so this is recorded
+  as a local VM/storage defect rather than an application failure.
+
+### Risks / Follow-ups
+
+- This is suitable for a public beta/developer preview after merging the branch. It is not a
+  production-ready or SOTA certification. Transactional V2 revisions/idempotency/audit,
+  backup/restore, multi-replica and quota drills, and held-out temporal/abstention quality
+  remain required.
+- The principal demo and MCP lifecycle verifier cover the service and adapter contracts, but
+  a real Claude/Codex/Hermes host pilot is still needed before claiming product-level native
+  integration.
+- The default branch is not yet updated and there is no tagged release, published image,
+  product homepage/live playground, logo, screenshot gallery, or launch video. These are
+  launch-distribution gaps, not memory-core correctness gaps.
+- `pgvector/pgvector:pg16` remains a mutable convenience tag; pin a tested multi-architecture
+  digest for a formal release artifact.
+- Kimi's completed architecture verdict remains **MODIFY** and its corrections are in the
+  architecture document. Further source/test review still requires explicit approval to send
+  relevant repository content to the configured external `api.kimi.com` endpoint.
