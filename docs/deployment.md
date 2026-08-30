@@ -294,41 +294,22 @@ CI now builds the default image without optional ONNX packages and boots that im
 
 ### docker-compose
 
-```yaml
-services:
-  memory-core:
-    build: .
-    ports: ["127.0.0.1:7401:7401"]
-    environment:
-      HOST: 0.0.0.0
-      MEMORY_PROVIDER: postgres
-      MEMORY_PG_URL: postgres://memory:memory@db:5432/memory_core
-      MEMORY_PG_AUTO_MIGRATE: "true"
-      MEMORY_CORE_PRINCIPAL_API_KEYS: ${MEMORY_CORE_PRINCIPAL_API_KEYS}
-      MEMORY_CORE_TENANT_API_KEYS: ${MEMORY_CORE_TENANT_API_KEYS}
-      MEMORY_CORE_API_KEYS: ${MEMORY_CORE_API_KEYS}
-    depends_on:
-      db: { condition: service_healthy }
-    restart: unless-stopped
+The checked-in [`docker-compose.yml`](../docker-compose.yml) is an executable local-beta
+stack: Postgres + pgvector, the memory-core image, a persistent volume, loopback-only host
+publication, and separate demo credentials for Claude, Codex, and Hermes.
 
-  db:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_USER: memory
-      POSTGRES_PASSWORD: memory
-      POSTGRES_DB: memory_core
-    volumes: ["pgdata:/var/lib/postgresql/data"]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U memory"]
-      interval: 5s
-      retries: 10
-
-volumes:
-  pgdata:
+```bash
+docker compose up --build -d
+node examples/shared-agent-demo.mjs
+docker compose down
 ```
 
-`pgvector/pgvector:pg16` ships the extension. On a plain `postgres` image the migration raises
-a notice and vector search stays disabled while full-text search keeps working.
+The credentials in that file are public examples, not deployable secrets. Replace them before
+non-local use. `docker compose down` preserves the named database volume; the stack deliberately
+uses application auto-migration for a one-command local demo. Production must use external
+migrations and `MEMORY_ENV=production`. `pgvector/pgvector:pg16` ships the extension. On a
+plain `postgres` image the migration raises a notice and vector search stays disabled while
+full-text search keeps working.
 
 ## Kubernetes
 

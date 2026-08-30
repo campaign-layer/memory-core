@@ -7,8 +7,8 @@ An HTTP + MCP memory service for AI agents. Ingest typed observations, retrieve 
 hybrid BM25 + vector search, and build a prompt-ready context block. Storage is pluggable
 behind one provider interface: in-memory, JSON file, or Postgres + pgvector.
 
-Pre-1.0. Retrieval quality is measured rather than asserted, and the measurements include
-the cases where we lose. Every number below names the command that produces it.
+Public beta, pre-1.0. Retrieval quality is measured rather than asserted, and the measurements
+include the cases where we lose. Every number below names the command that produces it.
 
 ---
 
@@ -55,6 +55,35 @@ the cases where we lose. Every number below names the command that produces it.
 
 Every command and every response below was executed against a running server on Node 22.14
 before publishing; the outputs are copied from that session, not written by hand.
+
+### Shared Claude → Codex → Hermes principal demo
+
+The checked-in Compose stack starts Postgres + pgvector and one authenticated memory service.
+The demo proves that three separately authenticated agent principals can share one actor-scoped
+memory while an app credential cannot impersonate another:
+
+```bash
+git clone https://github.com/campaign-layer/memory-core
+cd memory-core
+docker compose up --build -d
+node examples/shared-agent-demo.mjs
+```
+
+Expected final line:
+
+```text
+PASS: one actor memory crossed Claude -> Codex -> Hermes principals without sharing credentials.
+```
+
+This script exercises the same principal boundary used by the integrations; it does not launch
+the three third-party agent CLIs. Use the [integration guide](docs/INTEGRATION_GUIDE.md) for
+their MCP configuration. CI separately runs the MCP lifecycle verifier.
+
+The demo credentials are deliberately public and the service port is published only on
+`127.0.0.1`. Replace them before any non-local use. `docker compose down` stops the stack and
+preserves the Postgres volume.
+
+### Minimal in-memory walkthrough
 
 ```bash
 git clone https://github.com/campaign-layer/memory-core

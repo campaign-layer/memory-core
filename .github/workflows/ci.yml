@@ -31,6 +31,10 @@ jobs:
 
       - run: npm run build
 
+      - name: Validate the shared-agent launch demo
+        if: matrix.node == '22'
+        run: node --check examples/shared-agent-demo.mjs
+
       - name: Verify the embedded MCP lifecycle and restart persistence
         if: matrix.node == '22'
         run: npm run verify:mcp
@@ -100,45 +104,27 @@ jobs:
 
   container:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: memory_core_container
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d memory_core_container"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate the one-command Compose stack
+        run: docker compose config --quiet
       - name: Build production image without optional ONNX dependencies
-        run: docker build -t memory-core-ci .
+        run: docker compose build memory-core
       - name: Assert optional local model is absent
         run: >-
-          docker run --rm --entrypoint node memory-core-ci -e
+          docker compose run --rm --no-deps --entrypoint node memory-core -e
           "try { require.resolve('@huggingface/transformers'); process.exit(1) }
           catch (error) { process.exit(error.code === 'MODULE_NOT_FOUND' ? 0 : 1) }"
-      - name: Exercise provider-aware readiness
-        run: |
-          docker run -d --name memory-core-ci-run --network host \
-            -e MEMORY_PROVIDER=postgres \
-            -e MEMORY_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/memory_core_container \
-            -e MEMORY_PG_AUTO_MIGRATE=true \
-            memory-core-ci
-          for attempt in $(seq 1 30); do
-            ready=$(curl --fail --silent http://127.0.0.1:7401/ready || true)
-            if echo "$ready" | grep --quiet '"provider":"postgres"'; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs memory-core-ci-run
-          exit 1
-      - name: Cleanup smoke container
+      - name: Start the documented Compose topology
+        run: docker compose up --detach
+      - name: Exercise isolated cross-agent-principal memory sharing
+        run: node examples/shared-agent-demo.mjs
+      - name: Capture Compose logs
         if: always()
-        run: docker rm --force memory-core-ci-run || true
+        run: docker compose logs --no-color
+      - name: Cleanup Compose stack
+        if: always()
+        run: docker compose down --volumes
