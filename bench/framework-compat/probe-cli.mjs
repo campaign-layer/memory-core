@@ -91,7 +91,6 @@ if (!bin) {
         "--command", proxyCommand,
         "--arg", proxyWrapperPath,
         "--include", EXPECTED_TOOLS.join(","),
-        "--approval", "approve",
       ], hostEnv(stateDir), 60_000);
       verify = await execute(bin, ["mcp", "probe", "memory-core", "--json"], hostEnv(stateDir), 60_000);
     }

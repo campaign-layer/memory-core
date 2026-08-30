@@ -69,8 +69,11 @@
           "default": 6
         },
         "types": {
-          "description": "Restrict to these memory types. Omit to search everything.",
-          "type": "array",
+          "description": "Restrict to these memory types. Omit or send null to search everything.",
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "string",
             "enum": [
@@ -138,8 +141,11 @@
           "minLength": 1
         },
         "reason": {
-          "description": "Why it is wrong. Short.",
-          "type": "string",
+          "description": "Why it is wrong. Short. Omit or send null when unknown.",
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 200
         }
       },
@@ -167,8 +173,11 @@
           "maxLength": 1000
         },
         "reason": {
-          "description": "What changed. Short.",
-          "type": "string",
+          "description": "What changed. Short. Omit or send null when unknown.",
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 200
         }
       },

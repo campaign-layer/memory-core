@@ -79,8 +79,8 @@ export const recallShape = {
     .array(agentMemoryType)
     .min(1)
     .max(7)
-    .optional()
-    .describe("Restrict to these memory types. Omit to search everything."),
+    .nullish()
+    .describe("Restrict to these memory types. Omit or send null to search everything."),
 };
 
 export const buildContextShape = {
@@ -91,13 +91,13 @@ export const buildContextShape = {
 
 export const forgetShape = {
   memoryId: z.string().min(1).describe("id from a previous recall or build_context result."),
-  reason: z.string().max(200).optional().describe("Why it is wrong. Short."),
+  reason: z.string().max(200).nullish().describe("Why it is wrong. Short. Omit or send null when unknown."),
 };
 
 export const supersedeShape = {
   memoryId: z.string().min(1).describe("id of the outdated memory, from recall."),
   newText: z.string().min(4).max(1000).describe("The current value, stated so it stands alone."),
-  reason: z.string().max(200).optional().describe("What changed. Short."),
+  reason: z.string().max(200).nullish().describe("What changed. Short. Omit or send null when unknown."),
 };
 
 export const feedbackShape = {
@@ -208,7 +208,7 @@ export function getMemoryTool(name: string): MemoryToolDefinition<any> | undefin
 // ---------------------------------------------------------------------------
 
 export interface JsonSchemaNode {
-  type?: string;
+  type?: string | readonly string[];
   description?: string;
   enum?: readonly string[];
   items?: JsonSchemaNode;
@@ -237,6 +237,16 @@ function nodeToJsonSchema(schema: z.ZodTypeAny): { node: JsonSchemaNode; require
     case "ZodOptional": {
       const inner = nodeToJsonSchema(def.innerType);
       return { node: description ? { description, ...inner.node } : inner.node, required: false };
+    }
+    case "ZodNullable": {
+      const inner = nodeToJsonSchema(def.innerType);
+      const type = typeof inner.node.type === "string"
+        ? [inner.node.type, "null"]
+        : [...(inner.node.type ?? []), "null"];
+      return {
+        node: description ? { description, ...inner.node, type } : { ...inner.node, type },
+        required: inner.required,
+      };
     }
     case "ZodDefault": {
       const inner = nodeToJsonSchema(def.innerType);
@@ -617,7 +627,7 @@ async function recall(
 ): Promise<MemoryToolResult> {
   const hits = await ctx.backend.search({
     query: args.query,
-    filters: filtersFor(identity, args.types),
+    filters: filtersFor(identity, args.types ?? undefined),
     limit: args.limit,
   });
   return {

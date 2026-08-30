@@ -39,6 +39,11 @@ Separate Python environments are mandatory:
 - CrewAI / CrewAI Tools 1.15.18 with MCP 1.28.1
 - Hermes Agent 0.19.0 with its required MCP 1.26.0
 
+CrewAI Tools 1.15.18 materializes omitted optional MCP arguments as JSON
+`null`. Memory Core therefore treats `null` exactly like omission for the
+optional `recall.types`, `forget.reason`, and `supersede.reason` fields. Empty
+arrays, out-of-range values, and unknown enum values remain invalid.
+
 Claude Code, Codex CLI, Hermes CLI, and OpenClaw are graded independently. A
 Claude/Codex `mcp add` or `mcp list` is L0, not L1/L2. OpenClaw's
 `mcp doctor --probe` and Hermes's `mcp test` can establish L1. L3 requires an

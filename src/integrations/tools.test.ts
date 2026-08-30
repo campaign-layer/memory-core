@@ -66,6 +66,12 @@ test("schemas reject bad input", () => {
   const recall = getMemoryTool("recall")!.schema;
   assert.equal(recall.safeParse({ query: "hi", limit: 99 }).success, false);
   assert.equal(recall.safeParse({ query: "hi", types: [] }).success, false);
+  assert.equal(recall.safeParse({ query: "hi", types: null }).success, true);
+
+  const forget = getMemoryTool("forget")!.schema;
+  assert.equal(forget.safeParse({ memoryId: "m1", reason: null }).success, true);
+  const supersede = getMemoryTool("supersede")!.schema;
+  assert.equal(supersede.safeParse({ memoryId: "m1", newText: "updated fact", reason: null }).success, true);
 
   const feedback = getMemoryTool("feedback")!.schema;
   assert.equal(feedback.safeParse({ memoryId: "m1", signal: "positive" }).success, false);
@@ -447,7 +453,7 @@ test("openai export is structurally valid", () => {
   assert.deepEqual(recall.function.parameters.required, ["query"]);
   assert.deepEqual(recall.function.parameters.properties!.types, {
     description: recall.function.parameters.properties!.types!.description,
-    type: "array",
+    type: ["array", "null"],
     items: { type: "string", enum: ["fact", "preference", "goal", "project", "episode", "instruction", "tool_outcome"] },
     minItems: 1,
     maxItems: 7,
