@@ -101,9 +101,12 @@ npm install --prefix /opt/memory-core-framework-soak/cli \
   openclaw@2026.7.1-2
 ```
 
-Retain `npm ls --json` and `pip freeze` from all three environments with the
-run. The probes also reject a host whose self-reported version differs from the
-exact version expected by the generated configuration.
+The controller captures `node --version`, complete root/framework `npm ls`
+trees, an installed-package `npm query` inventory for the CLI prefix, and
+`pip freeze --all` from all three Python environments before it runs any
+framework probe. Missing, empty, or failed inventory capture is a hard stop and
+an explicit campaign gate. The probes also reject a host whose self-reported
+version differs from the exact version expected by the generated configuration.
 
 Generate a unique, permission-restricted run directory. The command refuses to
 overwrite an existing `run.env`.

@@ -141,6 +141,11 @@ let plannedFault = null;
 let expectedGenerations = null;
 let containerImageAtStart = null;
 let containerImageAtFinish = null;
+let runtimeInventory = {
+  passed: false,
+  capturedAt: null,
+  files: [],
+};
 const generationMonitoring = {
   checks: 0,
   successfulServiceChecks: 0,
@@ -977,6 +982,124 @@ async function runToFile(command, args, target, options = {}) {
   });
 }
 
+async function captureRuntimeInventories() {
+  const npmCli = path.resolve(
+    path.dirname(process.execPath),
+    "../lib/node_modules/npm/bin/npm-cli.js",
+  );
+  const hermesPython = process.env.HERMES_BIN
+    ? path.join(path.dirname(process.env.HERMES_BIN), "python")
+    : null;
+  const cliPrefix = process.env.CLAUDE_BIN
+    ? path.resolve(path.dirname(process.env.CLAUDE_BIN), "../..")
+    : null;
+  const specifications = [
+    {
+      name: "node",
+      file: "runtime-node-version.txt",
+      command: process.execPath,
+      args: ["--version"],
+      cwd: root,
+    },
+    {
+      name: "root-npm",
+      file: "runtime-root-npm.json",
+      command: process.execPath,
+      args: [npmCli, "ls", "--all", "--json", "--prefix", root],
+      cwd: root,
+    },
+    {
+      name: "framework-npm",
+      file: "runtime-framework-npm.json",
+      command: process.execPath,
+      args: [npmCli, "ls", "--all", "--json", "--prefix", path.join(root, "bench", "framework-compat")],
+      cwd: path.join(root, "bench", "framework-compat"),
+    },
+    {
+      name: "cli-npm",
+      file: "runtime-cli-npm.json",
+      command: cliPrefix ? process.execPath : null,
+      // OpenClaw 2026.7.1-2 ships one upstream metadata mismatch that makes
+      // `npm ls` exit ELSPROBLEMS despite a working exact install. `npm query`
+      // inventories every actually installed package without treating that
+      // already-attested host metadata issue as an evidence-capture failure.
+      args: cliPrefix ? [npmCli, "query", "*", "--json", "--prefix", cliPrefix] : [],
+      cwd: cliPrefix || root,
+    },
+    {
+      name: "autogen-python",
+      file: "runtime-autogen-freeze.txt",
+      command: process.env.AUTOGEN_PYTHON || null,
+      args: ["-m", "pip", "freeze", "--all"],
+      cwd: root,
+    },
+    {
+      name: "crewai-python",
+      file: "runtime-crewai-freeze.txt",
+      command: process.env.CREWAI_PYTHON || null,
+      args: ["-m", "pip", "freeze", "--all"],
+      cwd: root,
+    },
+    {
+      name: "hermes-python",
+      file: "runtime-hermes-freeze.txt",
+      command: hermesPython,
+      args: ["-m", "pip", "freeze", "--all"],
+      cwd: root,
+    },
+  ];
+
+  const files = await Promise.all(specifications.map(async (specification) => {
+    const target = path.join(runDir, specification.file);
+    let result;
+    if (specification.command) {
+      result = await runToFile(
+        specification.command,
+        specification.args,
+        target,
+        { cwd: specification.cwd, timeoutMs: 5 * 60_000 },
+      );
+    } else {
+      const detail = `${specification.name} runtime path is not configured\n`;
+      await writeFile(target, detail, { mode: 0o600, flag: "wx" });
+      result = {
+        code: null,
+        signal: null,
+        error: detail.trim(),
+        timedOut: false,
+        bytes: Buffer.byteLength(detail),
+      };
+    }
+    let structurallyValid = true;
+    if (specification.file.endsWith(".json") && result.bytes > 0) {
+      try {
+        JSON.parse(await readFile(target, "utf8"));
+      } catch {
+        structurallyValid = false;
+      }
+    }
+    const passed = commandPassed(result)
+      && Number.isInteger(result.bytes)
+      && result.bytes > 0
+      && structurallyValid;
+    return {
+      name: specification.name,
+      file: specification.file,
+      passed,
+      bytes: result.bytes,
+      structurallyValid,
+      sha256: result.bytes > 0 ? await sha256File(target) : null,
+      command: commandEvidence(result),
+    };
+  }));
+
+  return {
+    passed: files.every((file) => file.passed),
+    capturedAt: new Date().toISOString(),
+    files,
+  };
+}
+
 async function persistFinalEvidence() {
   const [ps, images, logs, postgres] = await Promise.all([
     compose("ps", "--format", "json"),
@@ -1149,10 +1272,18 @@ let workloadStartup = { passed: false, reason: "soak was not started" };
 let generationBaselines = { passed: false, application: null, database: null };
 let soakExit = { code: null, signal: null, error: "soak was not started" };
 
-if (!signalReceived) containerImageAtStart = await inspectContainerImageProvenance();
-if (!signalReceived) await runProbes("startup");
+runtimeInventory = await captureRuntimeInventories();
+event("runtime-inventory", runtimeInventory);
+if (!runtimeInventory.passed) {
+  hardStopController("locked runtime inventory capture failed");
+}
 
-if (!signalReceived) {
+if (!signalReceived && !controllerHardStopReason) {
+  containerImageAtStart = await inspectContainerImageProvenance();
+}
+if (!signalReceived && !controllerHardStopReason) await runProbes("startup");
+
+if (!signalReceived && !controllerHardStopReason) {
   soak = spawn(process.execPath, [path.join(root, "bench", "framework-compat", "soak.mjs")], {
     cwd: root,
     env: process.env,
@@ -1315,6 +1446,7 @@ const resourceCoverageGate = resourceStats.successful >= minimumSuccessfulResour
 
 const operationalPassed = !signalReceived
   && !controllerHardStopReason
+  && runtimeInventory.passed
   && profile.valid
   && runtimeContract.valid
   && workloadStartup.passed
@@ -1383,6 +1515,7 @@ const campaignSummary = {
   } : null,
   soakExit,
   soakResult: soakSummary?.result || "NOT_AVAILABLE",
+  runtimeInventory,
   frameworkRuns,
   faults,
   generation: {
@@ -1413,6 +1546,7 @@ const campaignSummary = {
     sourceHeadAndTreeStable,
     sourceAttestationMatches,
     runtimeContractValid: runtimeContract.valid,
+    lockedRuntimeInventoriesCaptured: runtimeInventory.passed,
     profileContractValid: profile.valid,
     bootstrapManifestMatchesRuntime: profile.bootstrapMatchesRuntime,
     composeProjectNameVerified: profile.composeProjectNameVerified,
