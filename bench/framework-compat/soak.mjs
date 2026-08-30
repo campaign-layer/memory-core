@@ -382,6 +382,10 @@ function visibleHit(body, marker) {
   return (body?.hits || []).some((hit) => hit?.memory?.text?.includes(marker));
 }
 
+function normalizedExactText(text) {
+  return typeof text === "string" ? text.replace(/\s+/g, " ").trim().toLowerCase() : "";
+}
+
 async function searchFor(
   principalIndex,
   marker,
@@ -762,13 +766,33 @@ async function concurrencyPreflight() {
       oracleAdd(principalIndex, record, marker);
     }
   }
+  // Audit through an independent read path as well as the ids returned by
+  // ingest. This catches a compounded storage/accounting bug that creates an
+  // unreported second active row while every response claims the same winner.
+  const durableAudit = await searchFor(
+    principalIndex,
+    marker,
+    "concurrency-dedupe-durable-audit",
+    true,
+  );
+  const expectedText = normalizedExactText(observation.text);
+  const durableExactIds = new Set((durableAudit.body?.hits || [])
+    .map((hit) => hit?.memory)
+    .filter((memory) => memory?.status === "active" && normalizedExactText(memory.text) === expectedText)
+    .map((memory) => memory.id));
+  const returnedWinnerId = uniqueRecords[0]?.id;
+  const durableExactKeyPassed = durableAudit.ok
+    && durableExactIds.size === 1
+    && Boolean(returnedWinnerId)
+    && durableExactIds.has(returnedWinnerId);
   const dedupePassed = duplicateResults.every((result) => result.ok)
     && records.length === duplicateResults.length
     && responseAccountingValid
     && createdTotal === 1
     && updatedTotal === duplicateResults.length - 1
     && uniqueRecords.length === 1
-    && activeIds.length === 1;
+    && activeIds.length === 1
+    && durableExactKeyPassed;
   concurrencyResults.exactDedupe = {
     passed: dedupePassed,
     attempts: duplicateResults.length,
@@ -778,6 +802,8 @@ async function concurrencyPreflight() {
     updatedTotal,
     uniqueReturnedIds: uniqueRecords.length,
     activeUniqueIds: activeIds.length,
+    durableExactKeyPassed,
+    durableExactIds: durableExactIds.size,
   };
   if (!dedupePassed) counters.concurrencyFailures += 1;
 

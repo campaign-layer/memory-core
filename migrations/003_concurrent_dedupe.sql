@@ -10,6 +10,24 @@ BEGIN;
 
 LOCK TABLE memories IN SHARE ROW EXCLUSIVE MODE;
 
+-- Direct library/database writers predate the HTTP schema guard, so reject a
+-- missing or unknown decay kind before winner selection. Without this invariant
+-- the kind test evaluates to SQL NULL: the row can remain active and block the
+-- unique key while default reads hide it behind NOT expired(...). ttlDays keeps
+-- the provider's existing guarded 180-day fallback for malformed legacy values.
+ALTER TABLE memories
+  ADD CONSTRAINT memories_decay_policy_shape_check
+  CHECK (
+    CASE
+      WHEN jsonb_typeof(decay_policy) <> 'object' THEN false
+      WHEN (decay_policy ->> 'kind') IS NULL
+        OR (decay_policy ->> 'kind') NOT IN ('none', 'time', 'inactivity') THEN false
+      ELSE true
+    END
+  ) NOT VALID;
+
+ALTER TABLE memories VALIDATE CONSTRAINT memories_decay_policy_shape_check;
+
 -- MD5 remains for the older lookup index. The uniqueness boundary uses the
 -- built-in SHA-256 function so adversarially chosen MD5 collisions cannot merge
 -- two different memories. Keeping the normalized-text equality checks in the
@@ -84,7 +102,7 @@ WITH active AS (
          CASE WHEN scope = 'thread' THEN coalesce(thread_id, '') ELSE '' END AS locus_thread,
          last_seen_at,
          updated_at,
-         (
+         coalesce((
            (decay_policy ->> 'kind') IN ('time', 'inactivity')
            AND CASE
                  WHEN (decay_policy ->> 'ttlDays') ~ '^[0-9]+(\.[0-9]+)?$'
@@ -99,7 +117,7 @@ WITH active AS (
                    THEN (decay_policy ->> 'ttlDays')::numeric
                  ELSE 180
                END * interval '1 day'
-         ) AS is_expired
+         ), false) AS is_expired
     FROM memories
    WHERE status = 'active'
 ), ranked AS (

@@ -438,14 +438,17 @@ npm run dev
 ```
 
 - `memories` carries a generated `search_vector tsvector` (summary weighted `A`, body `B`)
-  behind a partial GIN index, plus a generated `text_hash` for lookup. Five partial SHA-256
-  expression indexes enforce one active exact memory at the tenant, workspace, app, actor,
-  and thread loci. Service writes use one Postgres `INSERT ... ON CONFLICT DO UPDATE`, so
-  concurrent replicas return the same winner id instead of racing a pre-insert lookup.
+  behind a partial GIN index, plus a legacy `text_hash` retained for rollback compatibility.
+  Five partial SHA-256 expression indexes enforce one active exact memory at the tenant,
+  workspace, app, actor, and thread loci. Service writes use one Postgres `INSERT ... ON
+  CONFLICT DO UPDATE`, so concurrent replicas return the same winner id instead of racing a
+  pre-insert lookup.
 - Apply migration 003 before starting a binary that contains the atomic write path. The
-  migration blocks writes while it reconciles legacy duplicates and builds the five indexes;
-  reads continue. Old binaries do not understand the new invariant, so do not run old and
-  new writers concurrently during this schema transition.
+  migration blocks writes while it validates legacy decay-policy shapes, reconciles duplicates,
+  and builds the five indexes; reads continue. Old binaries do not understand the new invariant,
+  so do not run old and new writers concurrently during this schema transition. Prefer the
+  checksummed, ledger-idempotent `npm run migrate` runner; the raw migration 003 file is an
+  immutable transition and is not intended for manual replay after it commits.
 - Embeddings live in **one narrow table per dimension** (`memory_embeddings_384`, …).
   Provision each configured dimension during deployment with
   `SELECT memory_core_ensure_embedding_dim(dims)`. Search and ingest never run DDL.

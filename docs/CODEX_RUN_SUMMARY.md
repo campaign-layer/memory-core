@@ -592,13 +592,26 @@ production qualification, or SOTA memory quality.
   bounded whole-transaction retry; other uniqueness failures remain hard errors, while direct
   exact-dedupe conflicts surface as a typed error.
 - The soak oracle now requires one create, nineteen updates, one record per response, one
-  returned id, and one active id. It no longer accepts a run merely because only one of several
-  returned ids remains active.
+  returned id, one active id, and an independent exact-text search returning that same durable
+  id. It no longer accepts a run merely because only one of several returned ids remains active.
+- A frozen local Kimi pass over commit `9f2024f` produced substantive analysis but timed out
+  before returning its required final verdict; it is recorded as `TIMED_OUT_NO_FINAL_VERDICT`,
+  never as a clearance. Independent verification of its partial findings gave `MODIFY` and led
+  to a follow-up patch: readiness now validates table ownership, key shape, hash expression,
+  predicate, uniqueness, readiness, and validity; migration work has a 30-second lock timeout
+  but no request statement timeout; malformed/missing decay kinds fail migration atomically;
+  and `hideExpiredOnRead=false` keeps its former reinforcement semantics.
+- Added adversarial coverage for same-named indexes on the wrong table/wrong definition, a
+  one-millisecond request timeout around a deliberately slow migration, malformed legacy decay
+  rollback, and a two-pool 20-writer race replacing one pre-existing expired memory exactly
+  once. Updated the Postgres self-hosting documentation to require migration 003 and distinguish
+  the ledger-idempotent runner from non-replayable raw SQL transitions.
 
-Validation after the repair: the fresh-schema Postgres suite reports 37 tests, 30 passed and
-seven pgvector-only skips, including a seeded legacy-duplicate migration proof and the
-deterministic two-pool/20-writer regression returning one
-id and exact `created=1`/`updated=19` accounting. The 181-outcome application suite remains
+Validation after the repair: the fresh-schema Postgres suite reports 42 tests, 35 passed and
+seven pgvector-only skips, including seeded legacy-duplicate and invalid-decay migration proofs,
+structural readiness sabotage checks, and deterministic two-pool/20-writer regressions for both
+an empty key and a pre-existing expired row. The ordinary race returns one id and exact
+`created=1`/`updated=19` accounting. The 181-outcome application suite remains
 180 passed, one opt-in ONNX skip, zero failed; typechecks, build, harness syntax, and diff checks
 pass. A new bench canary, frozen-source Claude Opus review, and 24-hour primary qualification
 remain mandatory before any launch or production-ready claim.

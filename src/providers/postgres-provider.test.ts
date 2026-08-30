@@ -214,6 +214,44 @@ test("health reports connectivity, server version and constant-cost row estimate
   assert.match(status.detail ?? "", /rows_estimate=-?\d+/);
 });
 
+test("health rejects same-named dedupe indexes on the wrong table or definition", { skip }, async () => {
+  const schema = `mc_health_dedupe_${RUN.replace(/-/g, "")}`;
+  assert.match(schema, /^[a-z0-9_]+$/);
+  const admin = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+  await admin.query(`CREATE SCHEMA "${schema}"`);
+  const scopedPool = new Pool({
+    connectionString: env.url,
+    options: `-c search_path=${schema},public`,
+    max: 1,
+    allowExitOnIdle: true,
+  });
+  const scopedProvider = new PostgresMemoryProvider({ pool: scopedPool });
+  try {
+    for (const filename of ["001_init.sql", "002_memory_spaces.sql", "003_concurrent_dedupe.sql"]) {
+      await scopedPool.query(await readFile(path.resolve("migrations", filename), "utf8"));
+    }
+    assert.equal((await scopedProvider.health()).ok, true);
+
+    await scopedPool.query("DROP INDEX memories_active_actor_dedupe_uidx");
+    await scopedPool.query("CREATE TABLE readiness_decoy (id text PRIMARY KEY)");
+    await scopedPool.query("CREATE UNIQUE INDEX memories_active_actor_dedupe_uidx ON readiness_decoy (id)");
+    const wrongTable = await scopedProvider.health();
+    assert.equal(wrongTable.ok, false);
+    assert.match(wrongTable.detail ?? "", /apply migration 003_concurrent_dedupe/);
+
+    await scopedPool.query("DROP INDEX memories_active_actor_dedupe_uidx");
+    await scopedPool.query("CREATE UNIQUE INDEX memories_active_actor_dedupe_uidx ON memories (id)");
+    const wrongDefinition = await scopedProvider.health();
+    assert.equal(wrongDefinition.ok, false);
+    assert.match(wrongDefinition.detail ?? "", /apply migration 003_concurrent_dedupe/);
+  } finally {
+    await scopedProvider.close();
+    await scopedPool.end();
+    await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await admin.end();
+  }
+});
+
 test("migration ledger records ordered schema versions and source checksums", { skip }, async () => {
   const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
   try {
@@ -248,6 +286,35 @@ test("migration ledger rejects an edited applied migration", { skip }, async () 
     } finally {
       await changed.close();
     }
+  } finally {
+    await pool.query("DELETE FROM memory_core_migrations WHERE version = $1", [version]);
+    await pool.end();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("migration work is not killed by the request statement timeout", { skip }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "memory-core-migration-timeout-test-"));
+  const migrationFile = path.join(dir, `timeout_probe_${RUN}.sql`);
+  const version = path.basename(migrationFile, ".sql");
+  const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+  try {
+    await writeFile(migrationFile, "SELECT pg_sleep(0.05);\n", "utf8");
+    const slowMigration = new PostgresMemoryProvider({
+      connectionString: env.url,
+      migrationFile,
+      statementTimeoutMs: 1,
+    });
+    try {
+      await slowMigration.migrate();
+    } finally {
+      await slowMigration.close();
+    }
+    const applied = await pool.query<{ checksum: string | null }>(
+      "SELECT checksum FROM memory_core_migrations WHERE version = $1",
+      [version],
+    );
+    assert.match(applied.rows[0]?.checksum ?? "", /^[a-f0-9]{64}$/);
   } finally {
     await pool.query("DELETE FROM memory_core_migrations WHERE version = $1", [version]);
     await pool.end();
@@ -324,6 +391,54 @@ test("migration 003 consolidates legacy duplicates and leaves five valid unique 
     );
     assert.equal(Number(indexes.rows[0]?.count), 5);
   } finally {
+    client.release();
+    await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await pool.end();
+  }
+});
+
+test("migration 003 rejects malformed legacy decay policies atomically", { skip }, async () => {
+  const schema = `mc_dedupe_decay_${RUN.replace(/-/g, "")}`;
+  assert.match(schema, /^[a-z0-9_]+$/);
+  const pool = new Pool({ connectionString: env.url, max: 2, allowExitOnIdle: true });
+  const client = await pool.connect();
+  try {
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    await client.query(`SET search_path TO "${schema}", public`);
+    for (const filename of ["001_init.sql", "002_memory_spaces.sql"]) {
+      await client.query(await readFile(path.resolve("migrations", filename), "utf8"));
+    }
+    await client.query(
+      `INSERT INTO memories (
+         id, tenant_id, space_id, app_id, actor_id, scope, memory_type, text, decay_policy
+       ) VALUES (
+         'invalid_decay', 'legacy_tenant', 'legacy_space', 'legacy_app', 'legacy_actor',
+         'actor', 'fact', 'Malformed decay must not become an active zombie', '{}'::jsonb
+       )`,
+    );
+
+    await assert.rejects(
+      async () => client.query(await readFile(path.resolve("migrations", "003_concurrent_dedupe.sql"), "utf8")),
+      /memories_decay_policy_shape_check/,
+    );
+    await client.query("ROLLBACK");
+
+    const rolledBack = await client.query<{ constraint_exists: boolean; index_count: string }>(
+      `SELECT EXISTS (
+                SELECT 1 FROM pg_constraint
+                 WHERE conrelid = 'memories'::regclass
+                   AND conname = 'memories_decay_policy_shape_check'
+              ) AS constraint_exists,
+              (SELECT count(*)::text
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema()
+                  AND c.relname LIKE 'memories_active_%_dedupe_uidx') AS index_count`,
+    );
+    assert.equal(rolledBack.rows[0]?.constraint_exists, false);
+    assert.equal(Number(rolledBack.rows[0]?.index_count), 0);
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
     client.release();
     await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await pool.end();
@@ -690,6 +805,87 @@ test("twenty concurrent service writers return one durable exact-memory id", { s
   }
 });
 
+test("twenty concurrent writers replace one expired exact memory exactly once", { skip }, async () => {
+  let arrived = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+
+  class GatedExpiredProvider extends PostgresMemoryProvider {
+    override async ingestOrReinforceExact(candidate: MemoryRecord) {
+      arrived += 1;
+      if (arrived === 20) release();
+      await gate;
+      return super.ingestOrReinforceExact(candidate);
+    }
+  }
+
+  const left = new GatedExpiredProvider({ connectionString: env.url, poolMax: 12 });
+  const right = new GatedExpiredProvider({ connectionString: env.url, poolMax: 12 });
+  const services = Array.from({ length: 20 }, (_, index) =>
+    new MemoryCoreService(index % 2 === 0 ? left : right),
+  );
+  const t = tenant("atomic_expired_race");
+  const text = "The expired compatibility decision is replaced once";
+  const expired = record({
+    tenantId: t,
+    actorId: "agent_operator",
+    spaceId: "shared-agent-space",
+    text,
+    decayPolicy: { kind: "time", ttlDays: 1 },
+    createdAt: daysAgo(3),
+    firstSeenAt: daysAgo(3),
+    lastSeenAt: daysAgo(2),
+    updatedAt: daysAgo(2),
+  });
+  await provider!.ingest([expired]);
+
+  try {
+    const results = await Promise.all(services.map((service, index) => service.ingest({
+      observations: [{
+        tenantId: t,
+        spaceId: expired.spaceId,
+        appId: `framework_expired_${index}`,
+        actorId: expired.actorId,
+        scope: "actor",
+        memoryType: "fact",
+        text: index % 2 === 0 ? text : "  the EXPIRED compatibility decision is replaced once  ",
+        decayPolicy: { kind: "time", ttlDays: 1 },
+        source: { sourceType: "test", sourceId: `expired_writer_${index}` },
+      }],
+    })));
+    assert.equal(results.reduce((sum, result) => sum + result.created, 0), 1);
+    assert.equal(results.reduce((sum, result) => sum + result.updated, 0), 19);
+    const returnedIds = new Set(results.map((result) => result.records[0]?.id));
+    assert.equal(returnedIds.size, 1);
+    assert.ok(!returnedIds.has(expired.id));
+
+    const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+    try {
+      const stored = await pool.query<{ id: string; status: string }>(
+        `SELECT id, status
+           FROM memories
+          WHERE tenant_id = $1
+            AND scope = 'actor'
+            AND space_id = $2
+            AND actor_id = $3
+            AND memory_type = 'fact'
+            AND memory_core_text_sha256(lower(regexp_replace(btrim(text), '\\s+', ' ', 'g'))) =
+                memory_core_text_sha256(lower(regexp_replace(btrim($4::text), '\\s+', ' ', 'g')))
+          ORDER BY id`,
+        [t, expired.spaceId, expired.actorId, text],
+      );
+      assert.equal(stored.rows.length, 2);
+      assert.deepEqual(stored.rows.map((row) => row.status).sort(), ["active", "archived"]);
+      assert.equal(stored.rows.find((row) => row.status === "active")?.id, [...returnedIds][0]);
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await left.close();
+    await right.close();
+  }
+});
+
 test("exact ingest replaces active-but-expired time and inactivity memories", { skip }, async () => {
   const service = new MemoryCoreService(provider!);
   for (const kind of ["time", "inactivity"] as const) {
@@ -732,6 +928,56 @@ test("exact ingest replaces active-but-expired time and inactivity memories", { 
     } finally {
       await pool.end();
     }
+  }
+});
+
+test("hideExpiredOnRead=false preserves reinforcement semantics", { skip }, async () => {
+  const visibleExpired = new PostgresMemoryProvider({
+    connectionString: env.url,
+    hideExpiredOnRead: false,
+  });
+  const service = new MemoryCoreService(visibleExpired);
+  const t = tenant("expired_visible_dedupe");
+  const old = record({
+    tenantId: t,
+    text: "Visible expired memory is still reinforced",
+    decayPolicy: { kind: "time", ttlDays: 1 },
+    createdAt: daysAgo(3),
+    firstSeenAt: daysAgo(3),
+    lastSeenAt: daysAgo(2),
+    updatedAt: daysAgo(2),
+  });
+  try {
+    await visibleExpired.ingest([old]);
+    const result = await service.ingest({ observations: [{
+      tenantId: t,
+      appId: APP,
+      actorId: old.actorId,
+      scope: "actor",
+      memoryType: "fact",
+      text: old.text,
+      decayPolicy: old.decayPolicy,
+      source: { sourceType: "test", sourceId: "visible-expired-reinforcement" },
+    }] });
+    assert.equal(result.created, 0);
+    assert.equal(result.updated, 1);
+    assert.equal(result.records[0]?.id, old.id);
+
+    const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+    try {
+      const stored = await pool.query<{ total: string; active: string }>(
+        `SELECT count(*)::text AS total,
+                count(*) FILTER (WHERE status = 'active')::text AS active
+           FROM memories WHERE tenant_id = $1`,
+        [t],
+      );
+      assert.equal(Number(stored.rows[0]?.total), 1);
+      assert.equal(Number(stored.rows[0]?.active), 1);
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await visibleExpired.close();
   }
 });
 

@@ -123,6 +123,14 @@ const ACTIVE_DEDUPE_INDEXES = {
 
 const ACTIVE_DEDUPE_INDEX_NAMES = new Set<string>(Object.values(ACTIVE_DEDUPE_INDEXES));
 
+const ACTIVE_DEDUPE_INDEX_KEY_SIGNATURES = {
+  tenant: "tenant_id,memory_type,<expression>",
+  workspace: "tenant_id,space_id,memory_type,<expression>",
+  app: "tenant_id,space_id,app_id,memory_type,<expression>",
+  actor: "tenant_id,space_id,actor_id,memory_type,<expression>",
+  thread: "tenant_id,space_id,actor_id,<expression>,memory_type,<expression>",
+} as const satisfies Record<MemoryScope, string>;
+
 /** Raised only when a direct provider write loses the active exact-dedupe
  * invariant. MemoryCoreService uses ingestOrReinforceExact(), so normal service
  * callers receive the winning record rather than this error. */
@@ -327,9 +335,9 @@ function decayAnchorSql(alias: string): string {
 }
 
 function expiredSql(alias: string): string {
-  return `((${alias}.decay_policy ->> 'kind') IN ('time', 'inactivity')
+  return `COALESCE(((${alias}.decay_policy ->> 'kind') IN ('time', 'inactivity')
            AND ${ttlDaysSql(alias)} > 0
-           AND ${decayAnchorSql(alias)} < now() - ${ttlDaysSql(alias)} * interval '1 day')`;
+           AND ${decayAnchorSql(alias)} < now() - ${ttlDaysSql(alias)} * interval '1 day'), FALSE)`;
 }
 
 function statNumberSql(alias: string, key: string): string {
@@ -519,6 +527,12 @@ export class PostgresMemoryProvider implements MemoryProvider {
       this.migratePromise = (async () => {
         const client = await this.pool.connect();
         try {
+          // Normal request deadlines must not abort a deliberately blocking
+          // schema job halfway through a large-table index build. Bound lock
+          // acquisition instead, then allow the migration work itself to
+          // finish. RESET in finally keeps pooled request connections bounded.
+          await client.query("SET statement_timeout = 0");
+          await client.query("SET lock_timeout = '30s'");
           await client.query("SELECT pg_advisory_lock(hashtext('memory-core:schema-migrations'))");
           await client.query(
             `CREATE TABLE IF NOT EXISTS memory_core_migrations (
@@ -590,6 +604,8 @@ export class PostgresMemoryProvider implements MemoryProvider {
           throw error;
         } finally {
           await client.query("SELECT pg_advisory_unlock(hashtext('memory-core:schema-migrations'))").catch(() => {});
+          await client.query("RESET lock_timeout").catch(() => {});
+          await client.query("RESET statement_timeout").catch(() => {});
           client.release();
         }
       })().catch((error) => {
@@ -866,7 +882,9 @@ export class PostgresMemoryProvider implements MemoryProvider {
 
     try {
       return await this.withWriteTransaction(async (client) => {
-        await this.archiveExpiredExactDuplicates(client, [candidate]);
+        if (this.hideExpiredOnRead) {
+          await this.archiveExpiredExactDuplicates(client, [candidate]);
+        }
 
         const params = new Params();
         const cells = [
@@ -942,7 +960,9 @@ export class PostgresMemoryProvider implements MemoryProvider {
 
     try {
       return await this.withWriteTransaction(async (client) => {
-        await this.archiveExpiredExactDuplicates(client, ordered);
+        if (this.hideExpiredOnRead) {
+          await this.archiveExpiredExactDuplicates(client, ordered);
+        }
         const byId = new Map<string, MemoryRecord>();
         // 21 binds per row; 500 rows stays well inside the 65535 bind limit.
         for (let offset = 0; offset < ordered.length; offset += 500) {
@@ -1523,14 +1543,41 @@ export class PostgresMemoryProvider implements MemoryProvider {
                      AND attname = 'space_id' AND attnotnull AND NOT attisdropped
                 ) AS memory_space_column,
                 (SELECT count(*) = 5
-                   FROM pg_class index_relation
+                   FROM unnest($2::text[], $3::text[], $4::text[])
+                        AS expected(index_name, scope_name, key_signature)
+                   JOIN pg_class index_relation ON index_relation.relname = expected.index_name
                    JOIN pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
                    JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+                   CROSS JOIN LATERAL (
+                     SELECT string_agg(
+                              CASE WHEN key_part.attnum = 0 THEN '<expression>' ELSE attribute.attname END,
+                              ',' ORDER BY key_part.ordinality
+                            ) AS signature
+                       FROM unnest(index_state.indkey::smallint[]) WITH ORDINALITY
+                            AS key_part(attnum, ordinality)
+                       LEFT JOIN pg_attribute attribute
+                         ON attribute.attrelid = index_state.indrelid
+                        AND attribute.attnum = key_part.attnum
+                   ) AS actual_keys
                   WHERE index_namespace.nspname = current_schema()
-                    AND index_relation.relname = ANY($2::text[])
+                    AND index_state.indrelid = to_regclass('memories')
                     AND index_state.indisunique
                     AND index_state.indisready
-                    AND index_state.indisvalid) AS memory_dedupe_indexes,
+                    AND index_state.indisvalid
+                    AND actual_keys.signature = expected.key_signature
+                    AND position('memory_core_text_sha256' IN pg_get_indexdef(index_relation.oid)) > 0
+                    AND position('status = ''active''' IN pg_get_expr(index_state.indpred, index_state.indrelid)) > 0
+                    AND position(
+                          format('scope = %L', expected.scope_name)
+                          IN pg_get_expr(index_state.indpred, index_state.indrelid)
+                        ) > 0
+                    AND (
+                      expected.scope_name <> 'thread'
+                      OR position(
+                           'coalesce(thread_id'
+                           IN lower(pg_get_indexdef(index_relation.oid))
+                         ) > 0
+                    )) AS memory_dedupe_indexes,
                 (SELECT reltuples::bigint::text FROM pg_class WHERE oid = to_regclass('memories')) AS estimated_rows,
                 to_regclass($1)::text AS embedding_table,
                 EXISTS (
@@ -1541,6 +1588,8 @@ export class PostgresMemoryProvider implements MemoryProvider {
         [
           this.embedder ? `memory_embeddings_${this.embedder.dims}` : "memory_embeddings_384",
           Object.values(ACTIVE_DEDUPE_INDEXES),
+          Object.keys(ACTIVE_DEDUPE_INDEXES),
+          Object.values(ACTIVE_DEDUPE_INDEX_KEY_SIGNATURES),
         ],
       );
       const row = result.rows[0];
