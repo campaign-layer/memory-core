@@ -859,16 +859,20 @@ async function injectFault(name) {
 async function collectResources(force = false) {
   if (ending && !force) return;
   const sampledAtPerformance = performance.now();
-  const [ps, stats, postgres] = await Promise.all([
+  // Compose 2.40 accepts at most one service argument for `stats`. Sample the
+  // two qualification containers independently so a CLI grammar change cannot
+  // silently erase all resource evidence.
+  const [ps, appStats, dbStats, postgres] = await Promise.all([
     compose("ps", "--format", "json"),
-    compose("stats", "--no-stream", "--format", "json", "memory-core", "db"),
+    compose("stats", "--no-stream", "--format", "json", "memory-core"),
+    compose("stats", "--no-stream", "--format", "json", "db"),
     compose(
       "exec", "-T", "db", "psql", "-U", "memory", "-d", "memory_core", "-Atc",
       "SELECT json_build_object('connections',numbackends,'commits',xact_commit,'rollbacks',xact_rollback,'deadlocks',deadlocks,'temp_bytes',temp_bytes,'db_bytes',pg_database_size(current_database())) FROM pg_stat_database WHERE datname=current_database()",
     ),
   ]);
-  const commands = [ps, stats, postgres].map(commandEvidence);
-  const passed = [ps, stats, postgres].every(commandPassed);
+  const commands = [ps, appStats, dbStats, postgres].map(commandEvidence);
+  const passed = [ps, appStats, dbStats, postgres].every(commandPassed);
   const monotonicSinceWorkloadMs = workloadAnchor
     ? sampledAtPerformance - workloadAnchor.performanceMs
     : null;
@@ -886,7 +890,10 @@ async function collectResources(force = false) {
     monotonicSinceWorkloadMs,
     passed,
     composePs: commandPassed(ps) ? ps.stdout.trim() : null,
-    composeStats: commandPassed(stats) ? stats.stdout.trim().split("\n").filter(Boolean) : null,
+    composeStats: commandPassed(appStats) && commandPassed(dbStats)
+      ? [appStats.stdout, dbStats.stdout]
+        .flatMap((stdout) => stdout.trim().split("\n").filter(Boolean))
+      : null,
     postgres: commandPassed(postgres) ? postgres.stdout.trim() : null,
     commands,
   };

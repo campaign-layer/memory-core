@@ -46,12 +46,14 @@ const counters = {
   auditUnverified: 0,
   schedulerDrops: 0,
   concurrencyFailures: 0,
+  mutationNoops: 0,
 };
 const statusCounts = {};
 const opCounts = {};
 const recentUnexpected = [];
 const activeOracle = new Map();
 const oracleByPrincipal = principals.map(() => []);
+const leasedOracleIds = new Set();
 const concurrencyResults = {};
 const workloadMetrics = {
   configuredTargetOperations,
@@ -380,14 +382,27 @@ function visibleHit(body, marker) {
   return (body?.hits || []).some((hit) => hit?.memory?.text?.includes(marker));
 }
 
-async function searchFor(principalIndex, marker, purpose = "load", mustFind = false) {
+async function searchFor(
+  principalIndex,
+  marker,
+  purpose = "load",
+  mustFind = false,
+  accessThreadId = undefined,
+) {
   const principal = principals[principalIndex];
   const result = await request({
     op: "search",
     principalIndex,
     endpoint: "/v1/memory/search",
     purpose,
-    body: { query: marker, filters: identity(principal), limit: 10 },
+    body: {
+      query: marker,
+      filters: {
+        ...identity(principal),
+        ...(accessThreadId ? { accessThreadId } : {}),
+      },
+      limit: 10,
+    },
   });
   if (result.ok && mustFind && !visibleHit(result.body, marker)) {
     counters.acknowledgedLosses += 1;
@@ -396,7 +411,13 @@ async function searchFor(principalIndex, marker, purpose = "load", mustFind = fa
   return result;
 }
 
-async function contextFor(principalIndex, marker, purpose = "load", mustFind = false) {
+async function contextFor(
+  principalIndex,
+  marker,
+  purpose = "load",
+  mustFind = false,
+  accessThreadId = undefined,
+) {
   const principal = principals[principalIndex];
   const result = await request({
     op: "context",
@@ -405,7 +426,10 @@ async function contextFor(principalIndex, marker, purpose = "load", mustFind = f
     purpose,
     body: {
       query: marker,
-      filters: identity(principal),
+      filters: {
+        ...identity(principal),
+        ...(accessThreadId ? { accessThreadId } : {}),
+      },
       budget: { maxItems: 10, maxChars: 2000 },
     },
   });
@@ -443,13 +467,23 @@ async function getEntry(entry, purpose = "load") {
 
 async function feedback(entry) {
   const principal = principals[entry.principalIndex];
-  return request({
+  const result = await request({
     op: "feedback",
     principalIndex: entry.principalIndex,
     endpoint: "/v1/memory/feedback",
     purpose: "load",
-    body: { memoryId: entry.id, signal: "selected", ...identity(principal) },
+    body: {
+      memoryId: entry.id,
+      signal: "selected",
+      ...identity(principal),
+      ...(entry.threadId ? { accessThreadId: entry.threadId } : {}),
+    },
   });
+  if (result.ok && !result.body?.updated) {
+    counters.mutationNoops += 1;
+    await hardStop(`feedback acknowledged without updating active id ${entry.id}`);
+  }
+  return result;
 }
 
 async function archive(entry) {
@@ -464,9 +498,15 @@ async function archive(entry) {
       status: "archived",
       metadata: { reason: "soak lifecycle" },
       ...identity(principal),
+      ...(entry.threadId ? { accessThreadId: entry.threadId } : {}),
     },
   });
-  if (result.ok && result.body?.updated) oracleRetire(entry.id, "archived");
+  if (result.ok && result.body?.updated) {
+    oracleRetire(entry.id, "archived");
+  } else if (result.ok) {
+    counters.mutationNoops += 1;
+    await hardStop(`archive acknowledged without updating active id ${entry.id}`);
+  }
   return result;
 }
 
@@ -485,15 +525,16 @@ async function assertScopedVisibility(memoryId, principalIndex, expectedVisible,
   }
 }
 
-function randomActive(principalIndex = null) {
+function randomActive(principalIndex = null, { excludeLeased = false } = {}) {
   if (principalIndex !== null) {
     const ids = oracleByPrincipal[principalIndex];
-    for (let attempts = 0; attempts < 8 && ids.length; attempts += 1) {
-      const entry = activeOracle.get(ids[Math.floor(random() * ids.length)]);
-      if (entry) return entry;
-    }
+    const values = ids
+      .map((id) => activeOracle.get(id))
+      .filter((entry) => entry && (!excludeLeased || !leasedOracleIds.has(entry.id)));
+    return values.length ? values[Math.floor(random() * values.length)] : null;
   }
-  const values = [...activeOracle.values()];
+  const values = [...activeOracle.values()]
+    .filter((entry) => !excludeLeased || !leasedOracleIds.has(entry.id));
   return values.length ? values[Math.floor(random() * values.length)] : null;
 }
 
@@ -910,16 +951,29 @@ async function workloadOperation() {
     await ingest(principalIndex);
     return;
   }
-  const entry = randomActive(principalIndex) || randomActive();
+  const entry = randomActive(principalIndex, { excludeLeased: true })
+    || randomActive(null, { excludeLeased: true });
   if (!entry) {
     await ingest(principalIndex);
     return;
   }
-  if (roll < 0.50) await searchFor(entry.principalIndex, entry.marker, "load", true);
-  else if (roll < 0.75) await contextFor(entry.principalIndex, entry.marker, "load", true);
-  else if (roll < 0.85) await getEntry(entry);
-  else if (roll < 0.95) await feedback(entry);
-  else await archive(entry);
+  leasedOracleIds.add(entry.id);
+  try {
+    const accessThreadId = entry.scope === "thread" ? entry.threadId : undefined;
+    if (roll < 0.50) {
+      await searchFor(entry.principalIndex, entry.marker, "load", true, accessThreadId);
+    } else if (roll < 0.75) {
+      await contextFor(entry.principalIndex, entry.marker, "load", true, accessThreadId);
+    } else if (roll < 0.85) {
+      await getEntry(entry);
+    } else if (roll < 0.95) {
+      await feedback(entry);
+    } else {
+      await archive(entry);
+    }
+  } finally {
+    leasedOracleIds.delete(entry.id);
+  }
 }
 
 async function writeHeartbeat() {
@@ -950,6 +1004,7 @@ async function writeHeartbeat() {
     timing,
     workload,
     inFlight,
+    leasedOracleRecords: leasedOracleIds.size,
     activeOracleRecords: activeOracle.size,
     counters,
     statusCounts,
