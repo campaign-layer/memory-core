@@ -3,6 +3,13 @@
 Running memory-core. Read
 [Limits to know before you deploy](#limits-to-know-before-you-deploy) first.
 
+For exact-version Claude Code, Codex CLI, LangChain, LangGraph, OpenAI Agents,
+AutoGen, CrewAI, Hermes, and OpenClaw host checks plus the detached Postgres
+fault/endurance campaign, use the
+[framework compatibility runbook](../bench/framework-compat/README.md). Its L0,
+L1, L2, and L3 labels are deliberately separate; a client accepting a config
+does not prove tool discovery or execution.
+
 Earlier revisions of this file documented CORS settings, `LOG_LEVEL`, `NODE_ENV`-driven
 behaviour, winston logging, a `prom-client` `/metrics` endpoint, `FILE_BACKUP_*`,
 `ENHANCED_*`, `DUAL_LAYER_*` variables, and `/v1/memory/export` + `/v1/memory/import` routes.

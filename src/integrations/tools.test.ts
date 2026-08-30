@@ -4,6 +4,8 @@ import { InMemoryProvider } from "../providers/in-memory-provider.js";
 import { MemoryCoreService } from "../service.js";
 import { runAnthropicTurn } from "./adapters/anthropic.js";
 import { createMemoryToolkit } from "./adapters/generic.js";
+import { hermesMcpConfig } from "./adapters/hermes.js";
+import { openClawMcpConfig } from "./adapters/openclaw.js";
 import { runOpenAITurn } from "./adapters/openai-agents.js";
 import {
   MEMORY_TOOLS,
@@ -44,6 +46,14 @@ test("tool surface stays small and stable", () => {
     assert.ok(tool.description.length > 80, `${tool.name} needs a real description`);
   }
   assert.equal(getMemoryTool("nope"), undefined);
+});
+
+test("host configs do not advertise parallel revision calls", () => {
+  const identity = { tenantId: "acme", spaceId: "shared", appId: "agent", actorId: "alice" };
+  const hermes = hermesMcpConfig({ identity });
+  assert.equal(hermes.mcp_servers.memory_core!.supports_parallel_tool_calls, false);
+  const openclaw = openClawMcpConfig({ identity });
+  assert.equal(openclaw.mcp.servers["maitrix-memory-core"]!.supportsParallelToolCalls, false);
 });
 
 test("schemas reject bad input", () => {

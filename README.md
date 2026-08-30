@@ -683,6 +683,8 @@ Deployment guidance, docker-compose, Kubernetes and the operational limits:
   evidence/version/current-head target architecture. **Start here.**
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) — every harness, metric definitions, full results.
 - [`bench/README.md`](bench/README.md) — synthetic dataset design and label integrity.
+- [`bench/framework-compat/README.md`](bench/framework-compat/README.md) — exact-version agent
+  framework probes and the single-node Postgres endurance/fault campaign.
 - [`docs/providers.md`](docs/providers.md) — provider internals and scoring formulas.
 - [`docs/WORKING_OVERVIEW.md`](docs/WORKING_OVERVIEW.md) — the write path and the read path.
 - [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) — application integration plus

@@ -519,3 +519,54 @@ and separate verified beta readiness from production/SOTA claims.
 - Kimi's completed architecture verdict remains **MODIFY** and its corrections are in the
   architecture document. Further source/test review still requires explicit approval to send
   relevant repository content to the configured external `api.kimi.com` endpoint.
+
+## 2026-08-30 — exact-framework compatibility and endurance qualification
+
+### Scope
+
+Build a reproducible, fail-closed way to test the real Memory Core service against multiple
+agent frameworks on a dedicated bench host, then run a fault-injected canary before starting
+a detached 24-hour qualification. Compatibility evidence is graded L0–L3 so accepting a
+configuration is never reported as real tool execution.
+
+### Changes
+
+- Added exact-version probes for the MCP TypeScript SDK, LangChain, LangGraph, OpenAI Agents
+  MCP, the native OpenAI Agents adapter and real scripted Runner, AutoGen, CrewAI, Claude
+  Code, Codex CLI, Hermes, and OpenClaw. The deterministic hosts exercise the complete six-
+  tool lifecycle and corroborate state through authenticated REST reads.
+- Added a production-shaped, loopback-only Postgres/pgvector Compose stack with a separate
+  one-shot migrator, immutable database image requirement for qualified profiles, bounded
+  resources/logs, exact principal grants, and source revision/tree labels on the application
+  image. Ordinary production Docker builds still work without qualification labels.
+- Added a mixed-principal workload, isolation and scope preflights, concurrent dedupe and
+  feedback checks, an acknowledged-ID persistence oracle, monotonic timing, throughput and
+  scheduler gates, periodic audits, resource samples, and explicit application/database
+  restart and SIGKILL recovery tests.
+- Added a fail-closed campaign controller. It independently rechecks clean Git source, the
+  runtime contract, running image provenance, expected framework versions, scheduled probe
+  slots and faults, container generations, resource coverage, final logs, and cryptographic
+  artifact completeness. A terminal completion marker is written only after the final
+  summary and evidence manifest.
+- Added a sanitized review-bundle exporter with a strict allowlist, stable-copy checks,
+  streaming hashes, credential-derived secret scanning, and terminal/manifest verification.
+  Live credentials, isolated CLI homes, and framework homes are never exportable.
+- Disabled host-advertised parallel tool calls for Hermes and OpenClaw while remote
+  supersede remains a create-then-retire workflow. Added a regression test and a Node 24 CI
+  lane for harness syntax plus fail-closed configuration generation.
+
+### Validation before remote execution
+
+- Node 22.14.0: 181 outcomes, 180 passed, one opt-in ONNX test skipped, zero failed.
+- Root typecheck, benchmark typecheck, production build, every JavaScript harness syntax
+  check, the Python probe compile check, and `git diff --check` pass.
+- The generator's source, bounds, output-containment, version, and Compose contract rejection
+  cases were exercised locally. The full Docker/framework/fault path is intentionally left to
+  the dedicated Linux bench host and must not be inferred from these local checks.
+
+### Qualification status
+
+The attested bench canary, sanitized Claude Opus adversarial review, and detached 24-hour
+primary run are the next gates. Until the canary is green and the primary campaign reports
+`PASSED`, this section records implementation readiness only—not framework certification,
+production qualification, or SOTA memory quality.

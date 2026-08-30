@@ -32,6 +32,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
+    "migrate": "node dist/migrate.js",
     "dev": "tsx src/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test src/client.test.ts src/service.test.ts src/retrieval/*.test.ts src/integrations/*.test.ts src/providers/hybrid-search.test.ts src/extraction/*.test.ts",

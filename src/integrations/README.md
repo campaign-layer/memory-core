@@ -269,7 +269,7 @@ Config lives at `~/.openclaw/openclaw.json`:
           "MEMORY_PROVIDER": "file",
           "MEMORY_FILE_PATH": "/Users/you/.memory-core/store.json"
         },
-        "supportsParallelToolCalls": true,
+        "supportsParallelToolCalls": false,
         "toolFilter": {
           "include": ["remember", "recall", "build_context", "forget", "supersede", "feedback"]
         }
@@ -345,7 +345,7 @@ mcp_servers:
       MEMORY_ACTOR_ID: peter
       MEMORY_CORE_URL: http://127.0.0.1:7401
       MEMORY_CORE_API_KEY: sk-mc-abc123
-    supports_parallel_tool_calls: true
+    supports_parallel_tool_calls: false
     tools:
       include: [remember, recall, build_context, forget, supersede, feedback]
       prompts: false
