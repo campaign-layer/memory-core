@@ -742,6 +742,18 @@ async function concurrencyPreflight() {
   })));
   const records = duplicateResults.flatMap((result) => result.body?.records || []);
   const uniqueRecords = [...new Map(records.filter((record) => record?.id).map((record) => [record.id, record])).values()];
+  const createdTotal = duplicateResults.reduce((sum, result) =>
+    sum + (Number.isInteger(result.body?.created) ? result.body.created : 0), 0);
+  const updatedTotal = duplicateResults.reduce((sum, result) =>
+    sum + (Number.isInteger(result.body?.updated) ? result.body.updated : 0), 0);
+  const responseAccountingValid = duplicateResults.every((result) =>
+    Number.isInteger(result.body?.created)
+    && Number.isInteger(result.body?.updated)
+    && result.body.created >= 0
+    && result.body.updated >= 0
+    && result.body.created + result.body.updated === 1
+    && Array.isArray(result.body?.records)
+    && result.body.records.length === 1);
   const activeIds = [];
   for (const record of uniqueRecords) {
     const found = await scopedGet(record.id, principalIndex, "concurrency-dedupe-audit");
@@ -752,11 +764,18 @@ async function concurrencyPreflight() {
   }
   const dedupePassed = duplicateResults.every((result) => result.ok)
     && records.length === duplicateResults.length
+    && responseAccountingValid
+    && createdTotal === 1
+    && updatedTotal === duplicateResults.length - 1
+    && uniqueRecords.length === 1
     && activeIds.length === 1;
   concurrencyResults.exactDedupe = {
     passed: dedupePassed,
     attempts: duplicateResults.length,
     acknowledgedResponses: records.length,
+    responseAccountingValid,
+    createdTotal,
+    updatedTotal,
     uniqueReturnedIds: uniqueRecords.length,
     activeUniqueIds: activeIds.length,
   };

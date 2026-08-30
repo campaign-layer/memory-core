@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import pg from "pg";
 import {
   DEFAULT_PG_URL,
+  MemoryDedupeConflictError,
   PostgresMemoryProvider,
   type EmbeddingProviderLike,
 } from "./postgres-provider.js";
+import { MemoryCoreService } from "../service.js";
 import type { MemoryRecord, MemoryType, MemoryScope } from "../types.js";
 
 const { Client, Pool } = pg;
@@ -218,7 +220,10 @@ test("migration ledger records ordered schema versions and source checksums", { 
     const versions = await pool.query<{ version: string; checksum: string | null }>(
       "SELECT version, checksum FROM memory_core_migrations WHERE version LIKE '00%' ORDER BY version",
     );
-    assert.deepEqual(versions.rows.map((row) => row.version), ["001_init", "002_memory_spaces"]);
+    assert.deepEqual(
+      versions.rows.map((row) => row.version),
+      ["001_init", "002_memory_spaces", "003_concurrent_dedupe"],
+    );
     for (const row of versions.rows) assert.match(row.checksum ?? "", /^[a-f0-9]{64}$/);
   } finally {
     await pool.end();
@@ -247,6 +252,81 @@ test("migration ledger rejects an edited applied migration", { skip }, async () 
     await pool.query("DELETE FROM memory_core_migrations WHERE version = $1", [version]);
     await pool.end();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("migration 003 consolidates legacy duplicates and leaves five valid unique indexes", { skip }, async () => {
+  const schema = `mc_dedupe_migration_${RUN.replace(/-/g, "")}`;
+  assert.match(schema, /^[a-z0-9_]+$/);
+  const pool = new Pool({ connectionString: env.url, max: 2, allowExitOnIdle: true });
+  const client = await pool.connect();
+  try {
+    await client.query(`CREATE SCHEMA "${schema}"`);
+    await client.query(`SET search_path TO "${schema}", public`);
+    for (const filename of ["001_init.sql", "002_memory_spaces.sql"]) {
+      await client.query(await readFile(path.resolve("migrations", filename), "utf8"));
+    }
+    await client.query(
+      `INSERT INTO memories (
+         id, tenant_id, space_id, app_id, actor_id, scope, memory_type, text,
+         metadata, confidence, importance, first_seen_at, last_seen_at, created_at, updated_at, stats
+       ) VALUES
+       ('legacy_a', 'legacy_tenant', 'legacy_space', 'app_a', 'legacy_actor', 'actor', 'fact',
+        'Legacy exact duplicate', '{"a":1,"winner":"old"}', 0.6, 0.4,
+        now() - interval '5 days', now() - interval '3 days', now() - interval '5 days',
+        now() - interval '3 days', '{"selectedCount":1,"positiveCount":2,"negativeCount":0}'),
+       ('legacy_b', 'legacy_tenant', 'legacy_space', 'app_b', 'legacy_actor', 'actor', 'fact',
+        ' legacy   EXACT duplicate ', '{"b":2,"winner":"middle"}', 0.8, 0.5,
+        now() - interval '4 days', now() - interval '2 days', now() - interval '4 days',
+        now() - interval '2 days', '{"selectedCount":2,"positiveCount":0,"negativeCount":1}'),
+       ('legacy_c', 'legacy_tenant', 'legacy_space', 'app_c', 'legacy_actor', 'actor', 'fact',
+        'LEGACY exact duplicate', '{"c":3,"winner":"new"}', 0.7, 0.9,
+        now() - interval '3 days', now() - interval '1 day', now() - interval '3 days',
+        now() - interval '1 day', '{"selectedCount":3,"positiveCount":1,"negativeCount":2,"accessCount":4}')`,
+    );
+
+    await client.query(await readFile(path.resolve("migrations", "003_concurrent_dedupe.sql"), "utf8"));
+    const rows = await client.query<{
+      id: string;
+      status: string;
+      metadata: Record<string, unknown>;
+      stats: Record<string, number>;
+      confidence: number;
+      importance: number;
+    }>("SELECT id, status, metadata, stats, confidence, importance FROM memories ORDER BY id");
+    assert.equal(rows.rows.length, 3);
+    const winner = rows.rows.find((row) => row.status === "active");
+    assert.equal(winner?.id, "legacy_c");
+    assert.equal(rows.rows.filter((row) => row.status === "superseded").length, 2);
+    assert.deepEqual(winner?.metadata, { a: 1, b: 2, c: 3, winner: "new" });
+    assert.deepEqual(winner?.stats, {
+      selectedCount: 6,
+      positiveCount: 3,
+      negativeCount: 3,
+      accessCount: 4,
+    });
+    assert.equal(winner?.confidence, 0.8);
+    assert.equal(winner?.importance, 0.9);
+    for (const loser of rows.rows.filter((row) => row.status === "superseded")) {
+      assert.equal(loser.metadata.supersededBy, "legacy_c");
+      assert.equal(loser.metadata.supersedeReason, "migration-003-concurrent-dedupe");
+    }
+
+    const indexes = await client.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE n.nspname = $1
+          AND c.relname LIKE 'memories_active_%_dedupe_uidx'
+          AND i.indisunique AND i.indisready AND i.indisvalid`,
+      [schema],
+    );
+    assert.equal(Number(indexes.rows[0]?.count), 5);
+  } finally {
+    client.release();
+    await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await pool.end();
   }
 });
 
@@ -373,13 +453,16 @@ test("findDuplicate uses the dedup index rather than a table scan", { skip }, as
       `EXPLAIN SELECT id FROM memories m
         WHERE m.tenant_id = $1 AND m.scope = 'actor' AND m.memory_type = $2
           AND m.status = 'active'
-          AND m.text_hash = md5(lower(regexp_replace(btrim($3::text), '\\s+', ' ', 'g')))
+          AND memory_core_text_sha256(lower(regexp_replace(btrim(m.text), '\\s+', ' ', 'g'))) =
+              memory_core_text_sha256(lower(regexp_replace(btrim($3::text), '\\s+', ' ', 'g')))
+          AND lower(regexp_replace(btrim(m.text), '\\s+', ' ', 'g')) =
+              lower(regexp_replace(btrim($3::text), '\\s+', ' ', 'g'))
           AND m.space_id = $4 AND m.actor_id = $5`,
       [t, "fact", "probe row 42", "actor_plan", "actor_plan"],
     );
     const text = plan.rows.map((row) => row["QUERY PLAN"]).join("\n");
-    assert.match(text, /Index Scan using memories_dedup_v2_idx/, `expected an index scan, got:\n${text}`);
-    assert.match(text, /Index Cond:.*text_hash/, `text_hash should be an index condition, got:\n${text}`);
+    assert.match(text, /Index Scan using memories_active_actor_dedupe_uidx/, `expected an index scan, got:\n${text}`);
+    assert.match(text, /Index Cond:.*memory_core_text_sha256/, `SHA-256 should be an index condition, got:\n${text}`);
 
     const hit = await provider!.findDuplicate(
       record({ tenantId: t, actorId: "actor_plan", text: "  PROBE   Row 42 " }),
@@ -389,6 +472,295 @@ test("findDuplicate uses the dedup index rather than a table scan", { skip }, as
     await pool.query("DELETE FROM memories WHERE tenant_id = $1", [t]).catch(() => {});
     await pool.end();
   }
+});
+
+test("atomic exact ingest matches all five visibility loci", { skip }, async () => {
+  const service = new MemoryCoreService(provider!);
+  const cases: Array<{
+    label: string;
+    first: Parameters<typeof service.ingest>[0]["observations"][number];
+    second: Parameters<typeof service.ingest>[0]["observations"][number];
+  }> = [
+    {
+      label: "tenant",
+      first: {
+        tenantId: tenant("atomic_scopes_tenant"), spaceId: "space_a", appId: "app_a", actorId: "actor_a",
+        threadId: "thread_a", scope: "tenant", memoryType: "fact", text: "Tenant policy is immutable",
+        source: { sourceType: "test", sourceId: "first" },
+      },
+      second: {
+        tenantId: tenant("atomic_scopes_tenant"), spaceId: "space_b", appId: "app_b", actorId: "actor_b",
+        threadId: "thread_b", scope: "tenant", memoryType: "fact", text: "  tenant POLICY is immutable  ",
+        source: { sourceType: "test", sourceId: "second" },
+      },
+    },
+    {
+      label: "workspace",
+      first: {
+        tenantId: tenant("atomic_scopes_workspace"), spaceId: "shared", appId: "app_a", actorId: "actor_a",
+        scope: "workspace", memoryType: "fact", text: "Shared launch is Tuesday",
+        source: { sourceType: "test", sourceId: "first" },
+      },
+      second: {
+        tenantId: tenant("atomic_scopes_workspace"), spaceId: "shared", appId: "app_b", actorId: "actor_b",
+        threadId: "irrelevant", scope: "workspace", memoryType: "fact", text: "shared LAUNCH is tuesday",
+        source: { sourceType: "test", sourceId: "second" },
+      },
+    },
+    {
+      label: "app",
+      first: {
+        tenantId: tenant("atomic_scopes_app"), spaceId: "shared", appId: "app_a", actorId: "actor_a",
+        scope: "app", memoryType: "fact", text: "App deploy window is noon",
+        source: { sourceType: "test", sourceId: "first" },
+      },
+      second: {
+        tenantId: tenant("atomic_scopes_app"), spaceId: "shared", appId: "app_a", actorId: "actor_b",
+        threadId: "irrelevant", scope: "app", memoryType: "fact", text: "APP deploy window is noon",
+        source: { sourceType: "test", sourceId: "second" },
+      },
+    },
+    {
+      label: "actor",
+      first: {
+        tenantId: tenant("atomic_scopes_actor"), spaceId: "shared", appId: "app_a", actorId: "actor_a",
+        scope: "actor", memoryType: "fact", text: "Actor prefers concise output",
+        source: { sourceType: "test", sourceId: "first" },
+      },
+      second: {
+        tenantId: tenant("atomic_scopes_actor"), spaceId: "shared", appId: "app_b", actorId: "actor_a",
+        threadId: "irrelevant", scope: "actor", memoryType: "fact", text: "actor PREFERS concise output",
+        source: { sourceType: "test", sourceId: "second" },
+      },
+    },
+    {
+      label: "thread",
+      first: {
+        tenantId: tenant("atomic_scopes_thread"), spaceId: "shared", appId: "app_a", actorId: "actor_a",
+        threadId: "thread_a", scope: "thread", memoryType: "fact", text: "Thread decision is final",
+        source: { sourceType: "test", sourceId: "first" },
+      },
+      second: {
+        tenantId: tenant("atomic_scopes_thread"), spaceId: "shared", appId: "app_b", actorId: "actor_a",
+        threadId: "thread_a", scope: "thread", memoryType: "fact", text: "THREAD decision is final",
+        source: { sourceType: "test", sourceId: "second" },
+      },
+    },
+  ];
+
+  for (const fixture of cases) {
+    const first = await service.ingest({ observations: [fixture.first] });
+    const second = await service.ingest({ observations: [fixture.second] });
+    assert.equal(first.created, 1, `${fixture.label}: first observation should create`);
+    assert.equal(second.updated, 1, `${fixture.label}: second observation should reinforce`);
+    assert.equal(second.created, 0, `${fixture.label}: second observation must not create`);
+    assert.equal(second.records[0]?.id, first.records[0]?.id, `${fixture.label}: winner id must be stable`);
+  }
+
+  const distinctCases = [
+    {
+      label: "tenant",
+      first: { tenantId: tenant("atomic_distinct_tenant_a"), spaceId: "space", appId: APP, actorId: "actor" },
+      second: { tenantId: tenant("atomic_distinct_tenant_b"), spaceId: "space", appId: APP, actorId: "actor" },
+      scope: "tenant" as const,
+    },
+    {
+      label: "workspace",
+      first: { tenantId: tenant("atomic_distinct_workspace"), spaceId: "space_a", appId: APP, actorId: "actor" },
+      second: { tenantId: tenant("atomic_distinct_workspace"), spaceId: "space_b", appId: APP, actorId: "actor" },
+      scope: "workspace" as const,
+    },
+    {
+      label: "app",
+      first: { tenantId: tenant("atomic_distinct_app"), spaceId: "space", appId: "app_a", actorId: "actor" },
+      second: { tenantId: tenant("atomic_distinct_app"), spaceId: "space", appId: "app_b", actorId: "actor" },
+      scope: "app" as const,
+    },
+    {
+      label: "actor",
+      first: { tenantId: tenant("atomic_distinct_actor"), spaceId: "space", appId: APP, actorId: "actor_a" },
+      second: { tenantId: tenant("atomic_distinct_actor"), spaceId: "space", appId: APP, actorId: "actor_b" },
+      scope: "actor" as const,
+    },
+    {
+      label: "thread",
+      first: {
+        tenantId: tenant("atomic_distinct_thread"), spaceId: "space", appId: APP,
+        actorId: "actor", threadId: "thread_a",
+      },
+      second: {
+        tenantId: tenant("atomic_distinct_thread"), spaceId: "space", appId: APP,
+        actorId: "actor", threadId: "thread_b",
+      },
+      scope: "thread" as const,
+    },
+  ];
+  for (const fixture of distinctCases) {
+    const observation = {
+      scope: fixture.scope,
+      memoryType: "fact" as const,
+      text: `The ${fixture.label} locus remains distinct`,
+      source: { sourceType: "test", sourceId: "distinct-locus" },
+    };
+    const first = await service.ingest({ observations: [{ ...fixture.first, ...observation }] });
+    const second = await service.ingest({ observations: [{ ...fixture.second, ...observation }] });
+    assert.equal(first.created, 1);
+    assert.equal(second.created, 1, `${fixture.label}: a different relevant locus must not reinforce`);
+    assert.notEqual(second.records[0]?.id, first.records[0]?.id);
+  }
+});
+
+test("twenty concurrent service writers return one durable exact-memory id", { skip }, async () => {
+  let arrived = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+
+  class GatedPostgresProvider extends PostgresMemoryProvider {
+    override async ingestOrReinforceExact(candidate: MemoryRecord) {
+      arrived += 1;
+      if (arrived === 20) release();
+      await gate;
+      return super.ingestOrReinforceExact(candidate);
+    }
+  }
+
+  const left = new GatedPostgresProvider({ connectionString: env.url, poolMax: 12 });
+  const right = new GatedPostgresProvider({ connectionString: env.url, poolMax: 12 });
+  const services = Array.from({ length: 20 }, (_, index) =>
+    new MemoryCoreService(index % 2 === 0 ? left : right),
+  );
+  const t = tenant("atomic_race");
+  const canonicalText = "The compatibility soak must run continuously";
+
+  try {
+    const settled = await Promise.allSettled(services.map((service, index) => service.ingest({
+      observations: [{
+        tenantId: t,
+        spaceId: "shared-agent-space",
+        appId: `framework_${index}`,
+        actorId: "agent_operator",
+        scope: "actor",
+        memoryType: "fact",
+        text: index % 2 === 0 ? canonicalText : "  the COMPATIBILITY soak must run continuously  ",
+        metadata: { [`writer_${index}`]: true },
+        confidence: 0.5 + index / 100,
+        importance: 0.4 + index / 100,
+        source: { sourceType: "test", sourceId: `writer_${index}` },
+      }],
+    })));
+
+    const rejected = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    assert.deepEqual(rejected.map((result) => String(result.reason)), []);
+    const results = settled
+      .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof services[number]["ingest"]>>> =>
+        result.status === "fulfilled")
+      .map((result) => result.value);
+    assert.equal(results.length, 20);
+    assert.equal(results.reduce((sum, result) => sum + result.created, 0), 1);
+    assert.equal(results.reduce((sum, result) => sum + result.updated, 0), 19);
+    assert.ok(results.every((result) => result.records.length === 1));
+    const returnedIds = new Set(results.map((result) => result.records[0]!.id));
+    assert.equal(returnedIds.size, 1);
+
+    const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+    try {
+      const stored = await pool.query<{ total: string; active: string; ids: string[] }>(
+        `SELECT count(*)::text AS total,
+                count(*) FILTER (WHERE status = 'active')::text AS active,
+                array_agg(id ORDER BY id) AS ids
+           FROM memories
+          WHERE tenant_id = $1
+            AND scope = 'actor'
+            AND space_id = $2
+            AND actor_id = $3
+            AND memory_type = 'fact'
+            AND memory_core_text_sha256(lower(regexp_replace(btrim(text), '\\s+', ' ', 'g'))) =
+                memory_core_text_sha256(lower(regexp_replace(btrim($4::text), '\\s+', ' ', 'g')))`,
+        [t, "shared-agent-space", "agent_operator", canonicalText],
+      );
+      assert.equal(Number(stored.rows[0]?.total), 1);
+      assert.equal(Number(stored.rows[0]?.active), 1);
+      assert.deepEqual(stored.rows[0]?.ids, [...returnedIds]);
+    } finally {
+      await pool.end();
+    }
+  } finally {
+    await left.close();
+    await right.close();
+  }
+});
+
+test("exact ingest replaces active-but-expired time and inactivity memories", { skip }, async () => {
+  const service = new MemoryCoreService(provider!);
+  for (const kind of ["time", "inactivity"] as const) {
+    const t = tenant(`expired_dedupe_${kind}`);
+    const old = record({
+      tenantId: t,
+      text: `Expired ${kind} memory is replaced`,
+      decayPolicy: { kind, ttlDays: 1 },
+      createdAt: daysAgo(3),
+      firstSeenAt: daysAgo(3),
+      lastSeenAt: daysAgo(2),
+      updatedAt: daysAgo(2),
+    });
+    await provider!.ingest([old]);
+
+    const result = await service.ingest({ observations: [{
+      tenantId: t,
+      appId: APP,
+      actorId: old.actorId,
+      scope: "actor",
+      memoryType: "fact",
+      text: old.text,
+      decayPolicy: { kind, ttlDays: 1 },
+      source: { sourceType: "test", sourceId: "replacement" },
+    }] });
+    assert.equal(result.created, 1, `${kind}: expired row should not be reinforced`);
+    assert.equal(result.updated, 0);
+    assert.notEqual(result.records[0]?.id, old.id);
+
+    const pool = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+    try {
+      const rows = await pool.query<{ id: string; status: string; reason: string | null }>(
+        `SELECT id, status, metadata ->> 'archiveReason' AS reason
+           FROM memories WHERE tenant_id = $1 ORDER BY id`,
+        [t],
+      );
+      assert.equal(rows.rows.length, 2);
+      assert.deepEqual(rows.rows.map((row) => row.status).sort(), ["active", "archived"]);
+      assert.equal(rows.rows.find((row) => row.id === old.id)?.reason, "expired-before-exact-dedupe-replacement");
+    } finally {
+      await pool.end();
+    }
+  }
+});
+
+test("direct duplicate writes surface only the named dedupe conflict", { skip }, async () => {
+  const t = tenant("direct_dedupe_conflict");
+  const first = record({ tenantId: t, text: "Direct writes still fail closed" });
+  const second = record({ ...first, id: `${first.id}_other`, appId: "another_app" });
+  await provider!.ingest([first]);
+  await assert.rejects(
+    () => provider!.ingest([second]),
+    (error: unknown) => error instanceof MemoryDedupeConflictError &&
+      error.indexName === "memories_active_actor_dedupe_uidx",
+  );
+});
+
+test("a primary-key violation is never mislabeled as a dedupe conflict", { skip }, async () => {
+  const first = record({ tenantId: tenant("pkey_not_dedupe"), text: "Original primary-key owner" });
+  await provider!.ingest([first]);
+  const collidingId = record({
+    ...first,
+    text: "Different text with the same opaque id",
+    metadata: { collision: true },
+  });
+  await assert.rejects(
+    () => provider!.ingestOrReinforceExact(collidingId),
+    (error: unknown) => !(error instanceof MemoryDedupeConflictError)
+      && (error as { code?: string }).code === "23505"
+      && (error as { constraint?: string }).constraint === "memories_pkey",
+  );
 });
 
 test("search respects every MemoryFilters field", { skip }, async () => {

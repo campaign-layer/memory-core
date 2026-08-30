@@ -341,6 +341,16 @@ export class MemoryCoreService {
         },
       });
 
+      // Durable providers can arbitrate exact duplicates in the same storage
+      // transaction as the write. This is the only path that is safe across
+      // replicas: a portable findDuplicate() followed by ingest() is an
+      // unavoidable check/use race.
+      if (this.provider.ingestOrReinforceExact) {
+        const outcome = await this.provider.ingestOrReinforceExact(candidate);
+        (outcome.created ? created : updated).push(outcome.record);
+        continue;
+      }
+
       const duplicate = await this.provider.findDuplicate(candidate);
       if (duplicate) {
         // Re-observing reinforces recency and restarts inactivity decay. A

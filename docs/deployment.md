@@ -372,6 +372,23 @@ Use `/ready` for readiness and `/health` for liveness — that distinction matte
 Run the migration as a `Job` rather than relying on `MEMORY_PG_AUTO_MIGRATE` with three
 replicas racing each other. It is idempotent, but a single ordered application is cleaner.
 
+Migration `003_concurrent_dedupe.sql` is a deploy-before-code migration. Stop or drain every
+old writer, back up the database, run the migration job to completion, and only then start the
+new application replicas. The migration holds a table lock that blocks writes while it:
+
+1. detects any SHA-256 collision and fails closed;
+2. deterministically chooses one active winner per tenant/workspace/app/actor/thread exact key,
+   merges monotonic timestamps, confidence, importance, metadata, and feedback counters, and
+   preserves losing rows as `superseded` audit records; and
+3. builds five PostgreSQL 14-compatible partial unique expression indexes.
+
+Reads remain available during this migration, but the write pause grows with the size of the
+`memories` table and its active duplicate count. Measure it on a restored production snapshot
+before scheduling the maintenance window. Do not deploy the new binary first: without all five
+indexes, its atomic `ON CONFLICT` target deliberately fails rather than falling back to the old
+racy check-then-insert path. `/ready` also remains false when any expected index is missing,
+invalid, not ready, or non-unique.
+
 The memory-space upgrade backfills legacy rows into each record owner's personal space. This
 is intentionally privacy-preserving but narrows old `app`/`workspace` sharing. Before rollout,
 back up the database and explicitly update `space_id` for legacy records that should remain in

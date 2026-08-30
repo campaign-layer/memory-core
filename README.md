@@ -429,6 +429,7 @@ pgvector is optional at migrate time — the full-text path works without it.
 createdb memory_core_dev
 psql -d memory_core_dev -f migrations/001_init.sql
 psql -d memory_core_dev -f migrations/002_memory_spaces.sql
+psql -d memory_core_dev -f migrations/003_concurrent_dedupe.sql
 
 MEMORY_PROVIDER=postgres \
 MEMORY_PG_URL=postgres://localhost:5432/memory_core_dev \
@@ -437,8 +438,14 @@ npm run dev
 ```
 
 - `memories` carries a generated `search_vector tsvector` (summary weighted `A`, body `B`)
-  behind a partial GIN index, plus a generated `text_hash` for index-backed dedupe. Access
-  indexes cover both `(tenant_id, app_id)` provenance and `(tenant_id, space_id)` visibility.
+  behind a partial GIN index, plus a generated `text_hash` for lookup. Five partial SHA-256
+  expression indexes enforce one active exact memory at the tenant, workspace, app, actor,
+  and thread loci. Service writes use one Postgres `INSERT ... ON CONFLICT DO UPDATE`, so
+  concurrent replicas return the same winner id instead of racing a pre-insert lookup.
+- Apply migration 003 before starting a binary that contains the atomic write path. The
+  migration blocks writes while it reconciles legacy duplicates and builds the five indexes;
+  reads continue. Old binaries do not understand the new invariant, so do not run old and
+  new writers concurrently during this schema transition.
 - Embeddings live in **one narrow table per dimension** (`memory_embeddings_384`, …).
   Provision each configured dimension during deployment with
   `SELECT memory_core_ensure_embedding_dim(dims)`. Search and ingest never run DDL.

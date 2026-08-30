@@ -570,3 +570,35 @@ The attested bench canary, sanitized Claude Opus adversarial review, and detache
 primary run are the next gates. Until the canary is green and the primary campaign reports
 `PASSED`, this section records implementation readiness only—not framework certification,
 production qualification, or SOTA memory quality.
+
+### Canary defect and atomic-dedupe repair
+
+- A fresh exact-runtime canary passed all eleven framework startup probes and every runtime
+  inventory gate, then failed closed in its concurrency preflight: 20 acknowledged identical
+  writes produced three returned/active ids. The run finalized `FAILED`, `qualified:false`,
+  with zero isolation violations, zero acknowledged losses, clean final audits, and atomic
+  feedback `0 -> 20`. Its 42-file, 1.90 MB sanitized evidence bundle verifies against
+  `SHA256SUMS`; it is retained as negative evidence, not launch clearance.
+- Replaced Postgres service-level check-then-insert dedupe with a provider-native atomic
+  create-or-reinforce operation. Five scope-specific partial unique expression indexes now
+  exactly match the tenant/workspace/app/actor/thread visibility identity and use SHA-256;
+  normalized-text equality remains a fail-closed collision guard.
+- Migration 003 blocks writers, detects hash collisions, deterministically consolidates
+  existing active duplicates, merges monotonic fields/metadata/feedback counters, preserves
+  losers as superseded audit rows, and builds the invariant without a PostgreSQL 14 heap
+  rewrite. Readiness requires all five indexes to be unique, ready, and valid.
+- Active-but-logically-expired rows are archived in the same transaction before replacement,
+  preserving time/inactivity decay semantics. Deadlock and serialization aborts receive a
+  bounded whole-transaction retry; other uniqueness failures remain hard errors, while direct
+  exact-dedupe conflicts surface as a typed error.
+- The soak oracle now requires one create, nineteen updates, one record per response, one
+  returned id, and one active id. It no longer accepts a run merely because only one of several
+  returned ids remains active.
+
+Validation after the repair: the fresh-schema Postgres suite reports 37 tests, 30 passed and
+seven pgvector-only skips, including a seeded legacy-duplicate migration proof and the
+deterministic two-pool/20-writer regression returning one
+id and exact `created=1`/`updated=19` accounting. The 181-outcome application suite remains
+180 passed, one opt-in ONNX skip, zero failed; typechecks, build, harness syntax, and diff checks
+pass. A new bench canary, frozen-source Claude Opus review, and 24-hour primary qualification
+remain mandatory before any launch or production-ready claim.
