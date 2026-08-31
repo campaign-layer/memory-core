@@ -22,6 +22,30 @@ compatibility.
 Every result is attached to the exact framework version. Never summarize a
 partial matrix as universal compatibility.
 
+## Latest completed canary
+
+The live bench run of frozen commit `38a28067e9d49c00e2f6affeb620f2af6c486ddf` (tree
+`84a0ffa4563a6925acb45ebe71c9b96fa7a3038a`) completed the 900-second canary on
+2026-08-30 with `CANARY_PASSED`:
+
+- 3,552 requests, 3,550 successful and two expected fault-window errors;
+- 458 acknowledged writes, zero acknowledged losses and zero unverified audit records;
+- five audits covering 1,032 record checks;
+- zero isolation violations, unexpected responses, scheduler drops or concurrency failures;
+- exact-dedupe preflight: 20 attempts, `created=1`, `updated=19`, one returned/active/durable
+  id;
+- atomic-feedback preflight: 20 attempts, positive count `0 → 20`;
+- graceful restart and SIGKILL recovery for both the application and PostgreSQL, with every
+  structured post-fault audit passing.
+
+The run's terminal marker intentionally says `qualified:false`: only the 24-hour `primary`
+profile can be a production qualification. The canary used `MEMORY_EMBEDDER=none` and
+`MEMORY_EXTRACTOR=none`; its unique-marker recalls test mechanics and persistence, not
+semantic ranking quality or autonomous agent task improvement. See
+[`docs/AGENT_EVALUATION.md`](../../docs/AGENT_EVALUATION.md) for the separate L3/O1/O2 plan.
+The terminal bundle is retained on the bench host and is not committed here; this checkout
+contains the harness needed to reproduce a fresh run, not the completed run's proof by itself.
+
 ## Covered deterministic hosts
 
 The JavaScript lockfile pins and executes:

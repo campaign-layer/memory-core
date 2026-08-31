@@ -571,6 +571,9 @@ primary run are the next gates. Until the canary is green and the primary campai
 `PASSED`, this section records implementation readiness only—not framework certification,
 production qualification, or SOTA memory quality.
 
+Updated on 2026-08-31: the repaired 900-second canary completed `CANARY_PASSED`; see the next
+run entry. The frozen Claude review and 24-hour primary qualification remain open.
+
 ### Canary defect and atomic-dedupe repair
 
 - A fresh exact-runtime canary passed all eleven framework startup probes and every runtime
@@ -613,5 +616,93 @@ structural readiness sabotage checks, and deterministic two-pool/20-writer regre
 an empty key and a pre-existing expired row. The ordinary race returns one id and exact
 `created=1`/`updated=19` accounting. The 181-outcome application suite remains
 180 passed, one opt-in ONNX skip, zero failed; typechecks, build, harness syntax, and diff checks
-pass. A new bench canary, frozen-source Claude Opus review, and 24-hour primary qualification
-remain mandatory before any launch or production-ready claim.
+pass. The repaired bench canary is now complete; frozen-source Claude Opus review and the
+24-hour primary qualification remain mandatory before any production-ready claim.
+
+## Run: 2026-08-31 15:08 (IST)
+
+### Scope
+
+Document the exact framework compatibility evidence, same-harness comparisons with other
+memory systems, shared-instance multi-agent semantics, the completed short canary, and a
+rigorous path from autonomous L3 tool use to causal O1/O2 agent-outcome evidence.
+
+### Changes
+
+- Added an exact pinned-version framework matrix. Generic MCP, LangChain, LangGraph, both
+  OpenAI Agents routes, AutoGen and CrewAI are L2; Hermes/OpenClaw are L1; Claude Code/Codex
+  are L0. No route is described as autonomous L3 or task-uplift evidence.
+- Added a concise same-harness Memory Core versus supermemory/mem0 table. It reports the
+  early-precision losses alongside the retrieval-depth wins and lists unmeasured systems as
+  unmeasured instead of borrowing vendor numbers.
+- Documented one-instance multi-agent use: distinct credentials and producer apps, explicit
+  tenant/space/actor identities, actor/workspace/app/thread sharing patterns, and the boundary
+  between shared evidence and task coordination.
+- Added `docs/AGENT_EVALUATION.md`: stateless, token-matched transcript, Postgres+BM25,
+  Postgres+hybrid, competitor, oracle, read-disabled-placebo and irrelevant-memory arms;
+  retrieval-controlled versus end-to-end tracks; sealed paired tasks; L3/O1/O2 evidence;
+  a memory-on/off × shared/isolated multi-agent factorial; separate 24-hour quality and
+  reliability verdicts; seven-day drift; metrics, statistical treatment and provisional
+  release gates.
+- Corrected `buildContext` wording from “unmeasured” to its actual state: an internal
+  regression exists, but no public end-to-end agent-outcome score exists.
+- Recorded the live `CANARY_PASSED` evidence from commit `38a2806`, while stating that its
+  terminal bundle remains on the bench host and is not proof contained in this checkout.
+- Local Kimi Code 0.32.0 / `kimi-code/k3` completed a frozen, sanitized architecture and
+  experiment review with verdict **MODIFY — evidence gap**. Its corrections shaped the
+  factorial, inferential unit, task/lease boundary, evidence levels and longitudinal windows.
+
+### How It Works Now
+
+1. Each agent connects through its native adapter or a local stdio MCP proxy to one
+   authenticated Memory Core service.
+2. Principal configuration fixes tenant, space, app and actor outside model arguments.
+   Scopes decide intentional sharing; app/thread memory remains narrow while actor/workspace
+   memory can cross agents.
+3. Framework support claims stop at the highest observed L0/L1/L2 level for the exact pinned
+   version. A real model trace is required for L3.
+4. O1 pairs the same sealed single-agent scenario across memory controls and scores objective
+   environment outcomes. O2 estimates the shared-memory interaction in multi-agent tasks and
+   requires the effect to survive faults, growth and corrections.
+5. Memory remains evidence. Claims, leases, work ownership and consensus require separate
+   fenced coordination state.
+
+### Files Touched
+
+- `README.md` — public framework/multi-agent status and evaluation links.
+- `docs/INTEGRATION_GUIDE.md` — exact support matrix and shared-instance patterns.
+- `src/integrations/README.md` — route-specific verified/unverified claims.
+- `docs/BENCHMARKS.md` — comparison summary and corrected context-evaluation limits.
+- `docs/AGENT_EVALUATION.md` — causal and longitudinal experiment design.
+- `docs/ARCHITECTURE.md` — Kimi evidence gap and architecture priorities.
+- `bench/framework-compat/README.md` — completed canary summary and claim boundary.
+- `docs/CODEX_RUN_SUMMARY.md` — this handoff entry and the repaired-canary status correction.
+
+### Validation
+
+- Application suite: 181 outcomes, 180 passed, one opt-in ONNX case skipped, zero failed.
+- Application typecheck, benchmark typecheck and production build pass on Node 22.14.0.
+- The deterministic `buildContext` baseline passes and reproduces evidence recall 0.7692,
+  all-gold 0.7273, stale-over-current 0.375, abstention leakage 1.0 and zero budget violations.
+- All newly quoted supermemory/mem0 retrieval and matched-denominator QA values were checked
+  against the committed result artifacts.
+- Relative links across the eight affected documentation files, `git diff --check`, and the
+  branch-name policy pass.
+- Kimi exited 0. Raw review SHA-256:
+  `424a55ecfbf77c81edcbb447a688995c42a8391618e4643bc736f3156a0e8c22`;
+  independent validation:
+  `3f0cad92afbc803ee125632b7d184e868a6c9c6977737705a9c586ef0e91b045`;
+  receipt: `f91113a68f9b578b728ada6c880270d8e31716b77bf48dbf7b0d34b3553f59fa`.
+
+### Risks / Follow-ups
+
+- No autonomous L3, causal O1 or multi-agent O2 run has passed; the new gates are a protocol,
+  not a result.
+- The production-shaped Postgres provider, built-in extractor and hosted reranker still lack
+  a matched labeled quality run.
+- Direct competitor evidence is limited to supermemory on the internal synthetic suite and
+  mem0 OSS 2.0.14 on LoCoMo through our harness.
+- The 24-hour primary, backup/restore, rolling deployment, multi-replica behavior and
+  seven-day quality/drift study remain open.
+- Automatic semantic contradiction resolution and transactional remote revision remain open;
+  shared memory must not be used as a queue, lock or task lease.
