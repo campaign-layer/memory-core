@@ -19,7 +19,7 @@ actor, and thread access are never model-supplied** — they come from server co
 cannot choose a broader sharing boundary. A missing required identity throws rather than
 defaulting.
 
-## 1. MCP client (Claude Code, Claude Desktop, any MCP host)
+## 1. MCP client (Claude, Codex, and any MCP host)
 
 Two modes. **Embedded** owns its own provider; **remote** proxies a running memory-core
 service. Both are verified working.
@@ -30,8 +30,8 @@ Embedded, persisting to a file:
 {
   "mcpServers": {
     "memory-core": {
-      "command": "npx",
-      "args": ["tsx", "/absolute/path/to/memory-core/src/integrations/mcp-server.ts"],
+      "command": "node",
+      "args": ["/absolute/path/to/memory-core/dist/integrations/mcp-server.js"],
       "env": {
         "MEMORY_TENANT_ID": "acme",
         "MEMORY_SPACE_ID": "madhav-personal",
@@ -51,8 +51,8 @@ Remote, against a shared service:
 {
   "mcpServers": {
     "memory-core": {
-      "command": "npx",
-      "args": ["tsx", "/absolute/path/to/memory-core/src/integrations/mcp-server.ts"],
+      "command": "node",
+      "args": ["/absolute/path/to/memory-core/dist/integrations/mcp-server.js"],
       "env": {
         "MEMORY_CORE_URL": "https://memory.internal.acme.dev",
         "MEMORY_CORE_API_KEY": "sk-mc-...",
@@ -68,6 +68,25 @@ Remote, against a shared service:
 
 Claude Code: `~/.claude.json` (or `.mcp.json` in the project). Claude Desktop:
 `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS.
+
+Codex uses the same stdio server; the REST service itself is not an HTTP MCP endpoint:
+
+```bash
+codex mcp add memory-core \
+  --env MEMORY_CORE_MODE=remote \
+  --env MEMORY_CORE_URL=http://127.0.0.1:7401 \
+  --env MEMORY_CORE_API_KEY=replace-codex-key \
+  --env MEMORY_TENANT_ID=local \
+  --env MEMORY_SPACE_ID=madhav-personal \
+  --env MEMORY_APP_ID=codex \
+  --env MEMORY_ACTOR_ID=madhav \
+  -- node /absolute/path/to/memory-core/dist/integrations/mcp-server.js
+codex mcp list
+```
+
+Build first with `npm run build`. See the complete shared local setup, including distinct
+principal grants for Claude, Codex, and Hermes, in
+[`docs/INTEGRATION_GUIDE.md`](../../docs/INTEGRATION_GUIDE.md#connect-local-agents-to-the-shared-service).
 
 ### Environment
 
@@ -103,6 +122,10 @@ npx tsx src/integrations/verify-mcp.ts
 VERIFY_REMOTE_URL=http://127.0.0.1:7401 VERIFY_REMOTE_API_KEY=... npx tsx src/integrations/verify-mcp.ts
 ```
 
+The remote verifier uses `tenant=acme`, `space=user_42`, `app=remote-harness`, and
+`actor=user_42`; its key must be a global/tenant-admin key or an exact principal grant for
+that identity. A normal key for another app correctly receives 403.
+
 Spawns the server over stdio, lists tools, and drives
 `remember → recall → build_context → supersede → forget`, including a restart to prove
 persistence and a check that the process exits without leaking handles.
@@ -115,8 +138,7 @@ typed, so you pass your own client.
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
 import { MemoryCoreService, InMemoryProvider } from "@maitrix/memory-core";
-import { createEmbeddedBackend } from "@maitrix/memory-core/integrations";
-import { runAnthropicTurn } from "@maitrix/memory-core/integrations";
+import { createEmbeddedBackend, runAnthropicTurn } from "@maitrix/memory-core";
 
 const provider = new InMemoryProvider();
 const ctx = {
@@ -144,7 +166,7 @@ Pass `tools` + `toolHandlers` to mix in your own tools.
 Just want the tool definitions?
 
 ```ts
-import { toAnthropicTools, dispatch } from "@maitrix/memory-core/integrations";
+import { toAnthropicTools, dispatch } from "@maitrix/memory-core";
 
 const tools = toAnthropicTools(); // [{ name, description, input_schema }]
 const result = await dispatch("remember", { text: "Prefers Postgres" }, ctx);
@@ -157,7 +179,7 @@ The `openai` package is not a dependency; pass your own client.
 
 ```ts
 import OpenAI from "openai";
-import { runOpenAITurn } from "@maitrix/memory-core/integrations";
+import { runOpenAITurn } from "@maitrix/memory-core";
 
 const result = await runOpenAITurn("What's my deploy setup?", {
   client: new OpenAI(),
@@ -179,7 +201,7 @@ docs and are **not** checked at build time here — verify against your installe
 ## 4. Custom agent via the SDK
 
 ```ts
-import { createMemoryToolkit } from "@maitrix/memory-core/integrations";
+import { createMemoryToolkit } from "@maitrix/memory-core";
 
 const memory = createMemoryToolkit(ctx);
 
@@ -212,14 +234,16 @@ rendering of the six tools and their parameters.
 ### Backends
 
 ```ts
-createEmbeddedBackend(service, provider); // in-process; full forget/supersede
+createEmbeddedBackend(service, provider); // in-process; provider is retained for close()
 createRemoteBackend(new MemoryCoreClient({ baseUrl, apiKey })); // over HTTP
 ```
 
-Pass the `provider` to the embedded backend if you want `forget`/`supersede` to actually
-retire records. Without it — and in remote mode — they degrade to a negative feedback
-signal and **say so in the tool result** instead of silently doing less than advertised.
-See "Wanted from the REST API" below.
+Current embedded and remote backends both expose scoped id reads and retirement, so
+`forget`/`supersede` remove old records from active reads. The optional `provider` argument is
+retained for source compatibility and resource cleanup. A remote backend built with an older
+client that lacks `/get` and `/status` helpers degrades to a negative feedback signal and says
+so in the tool result. Supersede remains a create-then-retire sequence rather than one
+transaction; see [Scoped lifecycle REST API](#scoped-lifecycle-rest-api).
 
 ## 5. OpenClaw
 
@@ -272,7 +296,7 @@ descriptors for OpenClaw's `tool(...)` factory, and `openClawPluginManifest()` e
 
 ```ts
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { memoryCoreOpenClawTools } from "@maitrix/memory-core/integrations/adapters/openclaw.js";
+import { memoryCoreOpenClawTools } from "@maitrix/memory-core";
 
 export default defineToolPlugin({
   id: "maitrix-memory-core",
@@ -312,9 +336,8 @@ Two unrelated things are called Hermes. Both are real:
 ```yaml
 mcp_servers:
   memory_core:
-    command: npx
-    args: [tsx, src/integrations/mcp-server.ts]
-    cwd: /opt/memory-core
+    command: node
+    args: [/opt/memory-core/dist/integrations/mcp-server.js]
     env:
       MEMORY_TENANT_ID: acme
       MEMORY_SPACE_ID: platform-team

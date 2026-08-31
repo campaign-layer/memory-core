@@ -3,6 +3,12 @@ import { createMemoryCoreFromConfig, loadConfig } from "./index.js";
 const config = loadConfig();
 const { app, provider } = createMemoryCoreFromConfig(config);
 
+if (config.allowInsecureListen) {
+  console.warn(
+    "[memory-core] WARNING: unauthenticated non-loopback listening was explicitly enabled for development",
+  );
+}
+
 // Schema changes are an explicit boot phase. The listener is not opened until
 // they succeed, so /ready never has to perform DDL and a fresh deployment
 // cannot enter a permanent 503 loop waiting for application traffic.

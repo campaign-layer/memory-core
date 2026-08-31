@@ -9,7 +9,15 @@
 // HttpError is intentionally NOT re-exported: src/index.ts star-exports both this
 // module and retrieval/index.js, and a duplicated name there is an ambiguous
 // star export. Import it from ./retrieval/http.js.
-import { HttpError, type RetryOptions } from "../retrieval/http.js";
+import {
+  fetchWithinDeadline,
+  HttpDeadlineError,
+  HttpError,
+  readResponseTextWithinDeadline,
+  retryDelayMs,
+  sleepWithinDeadline,
+  type RetryOptions,
+} from "../retrieval/http.js";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -52,8 +60,6 @@ export class EmptyCompletionError extends Error {
     this.name = "EmptyCompletionError";
   }
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function retryable(status: number): boolean {
   return status === 429 || status === 408 || status >= 500;
@@ -223,6 +229,10 @@ export class OpenAiChatClient implements ChatClient {
     const baseDelay = this.retry.baseDelayMs ?? 500;
     const maxDelay = this.retry.maxDelayMs ?? 8000;
     const timeoutMs = this.retry.timeoutMs ?? 120_000;
+    const maxRetryAfterMs = this.retry.maxRetryAfterMs ?? maxDelay;
+    const maxResponseBytes = this.retry.maxResponseBytes ?? 1024 * 1024;
+    const deadlineAt = Date.now() + timeoutMs;
+    const fetchImpl = this.retry.fetchImpl ?? fetch;
     const backoff = (attempt: number) => Math.min(maxDelay, baseDelay * 2 ** attempt) * (0.5 + Math.random());
 
     const headers: Record<string, string> = { "content-type": "application/json", ...this.headers };
@@ -232,21 +242,27 @@ export class OpenAiChatClient implements ChatClient {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       let response: Response;
       try {
-        response = await fetch(url, {
+        response = await fetchWithinDeadline(fetchImpl, url, {
           method: "POST",
           headers,
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
+        }, deadlineAt, timeoutMs);
       } catch (error) {
+        if (error instanceof HttpDeadlineError) throw error;
         lastError = error;
         if (attempt === maxRetries) throw error;
         this.stats.retries += 1;
-        await sleep(backoff(attempt));
+        await sleepWithinDeadline(backoff(attempt), deadlineAt, url, timeoutMs);
         continue;
       }
 
-      const text = await response.text().catch(() => "");
+      const text = await readResponseTextWithinDeadline(
+        response,
+        maxResponseBytes,
+        deadlineAt,
+        url,
+        timeoutMs,
+      );
       if (response.ok) return parseJsonBody<RawCompletion>(text, url);
 
       // Endpoints that do not implement JSON mode reject the whole request.
@@ -259,10 +275,14 @@ export class OpenAiChatClient implements ChatClient {
       const error = new HttpError(response.status, text, url);
       if (!retryable(response.status) || attempt === maxRetries) throw error;
 
-      const retryAfter = Number(response.headers.get("retry-after"));
       lastError = error;
       this.stats.retries += 1;
-      await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : backoff(attempt));
+      await sleepWithinDeadline(
+        retryDelayMs(response, backoff(attempt), maxRetryAfterMs),
+        deadlineAt,
+        url,
+        timeoutMs,
+      );
     }
 
     throw lastError instanceof Error ? lastError : new Error(`${url} failed`);

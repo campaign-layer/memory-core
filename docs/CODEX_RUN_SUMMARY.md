@@ -269,3 +269,253 @@ multi-replica load, distributed quota, and durable audit evidence are still exte
   stale-over-current and abstention leakage numbers explicitly block production-quality and
   SOTA claims.
 - Audit or replace the optional ONNX dependency chain before enabling it in a release image.
+
+## Run: 2026-08-29 16:24 (IST)
+
+### Scope
+
+Turn the verified security, atomicity, provenance, temporal-quality, profile, migration, and
+operations gaps into one production architecture proposal; document a safe local shared
+service; and provide accurate Claude, Codex, and Hermes connection paths. The pass also fixes
+the executable quickstart and adds the existing MCP lifecycle verifier to CI.
+
+### Changes
+
+- Added a complete prioritized gap register and a proposed relational architecture built on
+  immutable evidence, append-only versions, one transactional current head, persisted
+  idempotency, bounded/rebuildable relations, explicit answerable/abstain/conflict decisions,
+  and deterministic structured profiles.
+- Defined the target fail-closed startup and SDK transport contracts, atomic batch/revision
+  APIs, extraction quarantine boundary, expand/backfill/cutover migration, release tests,
+  quantitative quality gates, and deliberately deferred feature set.
+- Added a secure local self-hosting topology: one loopback HTTP service is the sole file
+  writer, while Claude, Codex, and Hermes use distinct principal credentials and local stdio
+  MCP proxies to share one tenant/space/actor.
+- Added built-JavaScript connection commands for Claude Code, Codex CLI/app, and Hermes, plus
+  embedded-mode limitations and an explicit warning that the REST port is not an HTTP MCP
+  endpoint.
+- Corrected stale package imports and lifecycle claims. Root package imports now match the
+  actual export map; current remote `/get` and `/status` behavior is documented; embedded MCP
+  no longer inherits service embedder/reranker/extractor/Postgres claims.
+- Fixed `examples/quickstart.mjs` for the minimal readiness response, complete feedback
+  identity, operator-only compaction, and current Node/runtime guidance.
+- Added `npm run verify:mcp` to the Node 22 CI lane.
+
+### How It Works Now
+
+1. Build the checkout and run one memory-core HTTP process on `127.0.0.1` with file or
+   Postgres persistence and one exact principal grant per agent app.
+2. Claude, Codex, and Hermes each launch the compiled MCP server over stdio in remote mode.
+   The proxy pins identity from its environment and calls the shared REST service with its
+   own key.
+3. Same tenant/space/actor plus different app ids shares actor-scoped memories while retaining
+   producer provenance; app and thread scopes remain narrower.
+4. The architecture document describes the proposed V2 mutation/truth model. That model is
+   not implemented by this documentation pass; current remote supersede remains non-atomic.
+
+### Files Touched
+
+- `.github/workflows/ci.yml` — gate the embedded MCP lifecycle and restart verifier.
+- `README.md` — loopback quickstart, local self-host links, and correct embedded/remote claims.
+- `docs/ARCHITECTURE.md` — verified gap register and proposed production V2 architecture.
+- `docs/INTEGRATION_GUIDE.md` — local Claude, Codex, and Hermes connection walkthrough.
+- `docs/deployment.md` — safe local topology, identity grants, storage and security limits.
+- `docs/README.md` — updated documentation map.
+- `src/integrations/README.md` — built stdio commands, Codex setup, correct imports/lifecycle.
+- `examples/quickstart.mjs` — executable readiness/auth/feedback/compaction walkthrough.
+- `docs/CODEX_RUN_SUMMARY.md` — this handoff entry.
+
+### Validation
+
+- Node 20 TypeScript typecheck and build passed.
+- Node 20 unit/integration suite: 171 outcomes, 170 passed, one opt-in ONNX test skipped, zero
+  failed.
+- MCP end to end passed all six tools, file restart persistence, supersede, forget, and clean
+  shutdown; the compiled MCP entry point starts with the documented identity variables.
+- Updated HTTP quickstart passed end to end against a short-lived loopback service and the
+  service shut down cleanly.
+- Hermes Python contract tests passed 4/4; `node --check examples/quickstart.mjs` and
+  `git diff --check` passed.
+- Codex stdio syntax was checked against the installed Codex CLI and official OpenAI MCP
+  documentation. Claude and Hermes shapes were checked against their official documentation.
+- GitHub CI run `33248998776` passed every job: Node 20/22, the new MCP lifecycle gate,
+  benchmark/context determinism, Postgres + pgvector, Hermes schemas/contracts, and the
+  production container readiness smoke.
+
+### Risks / Follow-ups
+
+- A new local Kimi collaboration was attempted with the full gap list, but `kimi-code/k3`
+  returned HTTP 403 for its five-hour usage quota before any dialogue. No Kimi architecture
+  agreement or sign-off is claimed. The previous partial Kimi findings were independently
+  reproduced; this ADR remains ready for a verbatim Kimi challenge after quota reset.
+- The target evidence/version/current-head model is a proposal, not shipped behavior. The P1
+  insecure default listener/SDK redirect findings and P2 ingestion/extraction/revision gaps
+  remain open in code.
+- Generic MCP protocol behavior is locally verified, but this pass did not run a real Claude,
+  Codex, or Hermes host through the full shared-service scenario.
+- Representative migration/load, multi-replica chaos, backup/restore, distributed quota,
+  audit export, and held-out abstention/temporal targets remain release gates.
+
+## Run: 2026-08-30 00:09 (IST)
+
+### Scope
+
+Implement the smallest safe P0-A prerequisite for the proposed V2 ledger, challenge the
+architecture with local Kimi, keep the local Claude/Codex/Hermes self-hosting path accurate,
+run the full local validation matrix, and prepare the branch for GitHub and Codex Cloud.
+
+### Changes
+
+- Changed the configured server default from all interfaces to `127.0.0.1`. An
+  unauthenticated non-loopback listener now fails closed unless the explicit development-only
+  override is enabled. `MEMORY_ENV=production` rejects that override and requires credentials,
+  Postgres, an explicit database URL, and application auto-migration disabled.
+- Hardened `MemoryCoreClient`: absolute URL validation, no URL credentials/query/fragment,
+  HTTPS outside literal loopback, redirects rejected, a 10-second whole-response deadline,
+  deterministic deadline errors, and a 1 MiB default response limit.
+- Hardened hosted embedder/reranker/extractor transport: redirects rejected; fetch, body read,
+  retry sleeps, and all attempts share one deadline; response bodies are bounded; server
+  `Retry-After` is clamped. Timeout-induced transport errors normalize to the declared
+  deadline error.
+- Kept failed extraction and successful no-accepted-facts windows as operator-searchable raw
+  evidence, labelled them separately as `fallback` and `no_facts`, and excluded both from
+  prompt assembly by default. The deprecated enhanced-provider prompt path enforces the same
+  quarantine.
+- Updated deployment, working-overview, and root documentation for safe local hosting,
+  Docker/Kubernetes bind requirements, the production startup matrix, and current transport
+  behavior.
+- Incorporated Kimi's architecture corrections: authoritative durable resolution decisions,
+  same-scope-only uniqueness, explicit recorded/effective-time precedence, deterministic
+  legacy collision reconciliation, and a concrete fsync/rename/fsync file snapshot boundary.
+
+### Kimi Review
+
+- One local `kimi-code/k3` architecture turn completed and returned **MODIFY**: the relational
+  evidence ledger plus bounded relation projection is the right minimal core, but a
+  rebuildable graph projection must never decide conflict suppression, quarantine, access, or
+  prompt admission.
+- Kimi also rejected an overbroad uniqueness claim, requested explicit bitemporal ordering and
+  legacy collision policy, and required the file snapshot to publish heads, idempotency
+  operations, and outbox atomically. The architecture document now reflects each point.
+- Further Kimi source/test review is not represented as complete. The installed CLI uses the
+  external `api.kimi.com` endpoint, and transmitting repository source requires explicit user
+  approval after that boundary is disclosed.
+
+### Validation
+
+- Node 20 and Node 22 full unit/integration runs each report 180 outcomes: 179 passed, one
+  opt-in ONNX semantic test skipped, zero failed. The final post-review focused suite passes
+  82/82.
+- TypeScript application and benchmark typechecks, production build, `git diff --check`, and
+  quickstart JavaScript syntax pass.
+- Embedded MCP end to end passes six-tool discovery, remember/recall/context/feedback,
+  restart persistence, supersede, forget, and clean resource release. Hermes Python contracts
+  pass 4/4; generated Hermes schemas and both generated benchmark fixtures are byte-stable.
+- Postgres reports 31 outcomes: 24 passed and seven pgvector-only cases skipped because the
+  locally reachable server has no vector extension. Docker Desktop did not expose a usable
+  daemon, leaving the clean pgvector and production-container checks to GitHub CI.
+- Internal retrieval gate passes: in-memory R@1 40.9%, R@10 89.8%, MRR 0.615, nDCG@10 0.648.
+  Context evidence recall is 0.7692 with no budget violations. Stale-over-current remains
+  0.375 and abstention leakage remains 1.0; this slice makes no quality/SOTA claim.
+
+### Handoff / Remaining Gates
+
+- P0-B remains the next implementation slice: V2 evidence/series/version/head tables,
+  persisted idempotency, atomic batch ingest, CAS revision, transactional audit/outbox, and
+  single-writer crash-safe file snapshots.
+- Production-ready remains blocked on durable audit, shared quotas, backup/restore and
+  multi-replica drills, representative held-out context quality, pgvector/container CI, and
+  the transactional V2 mutation core.
+- The authenticated Codex Cloud CLI has no environment for `campaign-layer/memory-core`.
+  No task was submitted to an unrelated repository; create/connect that environment or supply
+  its environment id before handing this branch to Cloud.
+
+## Run: 2026-08-30 15:31 (IST)
+
+### Scope
+
+Prepare the hardened branch for an honest Product Hunt public-beta launch: provide a short,
+reproducible Postgres + pgvector path that demonstrates isolated cross-app memory sharing,
+make that exact topology a release gate, remove the remaining default-graph dependency alert,
+and separate verified beta readiness from production/SOTA claims.
+
+### Changes
+
+- Added a checked-in Compose stack with Postgres + pgvector, persistent storage, a
+  loopback-only host port, and three exact principal grants labelled Claude, Codex, and
+  Hermes. The public credentials are explicitly local-demo only.
+- Added a dependency-free Node 20+ demo. It proves one credential cannot impersonate another,
+  Claude's principal can write actor-scoped evidence, Codex's principal can recall it across
+  producer apps, and Hermes's principal receives it in bounded prompt context.
+- Bounded readiness to one 60-second operation, bounded each probe to two seconds, retained
+  the final diagnostic, and rejected unsupported Node versions immediately.
+- Changed the container CI lane from a separate host-network smoke to the exact documented
+  Compose bridge topology. CI builds the production image, verifies optional ONNX is absent,
+  starts the database and service in dependency order, runs the demo, captures logs, and
+  always removes containers, network, and test volume.
+- Marked the project as public beta in the README and documented what the demo does and does
+  not prove. It exercises the integration identity boundary; it does not launch third-party
+  Claude, Codex, or Hermes products.
+- Updated `tsx` to 4.23.13 / esbuild 0.28.2. This removes the remaining development-only
+  esbuild advisory. The already-updated branch also carries patched body-parser 2.3.0 and
+  qs 6.15.3, which are still reported only against the unmerged default branch.
+
+### How It Works Now
+
+1. `docker compose up --build -d` builds memory-core and starts pgvector Postgres behind a
+   private Compose network; only memory-core port 7401 is published, on host loopback.
+2. Postgres must become healthy before memory-core starts. The local stack applies ordered,
+   checksummed migrations and exposes provider-aware readiness.
+3. `node examples/shared-agent-demo.mjs` first sends a deliberate cross-app impersonation and
+   requires HTTP 403. It then writes, recalls, and assembles context with three distinct keys
+   sharing the same tenant/space/actor coordinate.
+4. GitHub runs that same path on every push/PR alongside Node 20/22, Postgres+pgvector,
+   retrieval/context benchmarks, MCP lifecycle, and Hermes contract gates.
+
+### Files Touched
+
+- `docker-compose.yml` — executable local public-beta topology and bounded demo principals.
+- `examples/shared-agent-demo.mjs` — negative authorization plus cross-app write/recall/context
+  proof.
+- `.github/workflows/ci.yml` — exact Compose end-to-end release gate and cleanup.
+- `README.md`, `docs/deployment.md` — beta positioning, runnable commands, and production
+  distinctions.
+- `package.json`, `package-lock.json` — demo command and patched development runner.
+- `docs/CODEX_RUN_SUMMARY.md` — this handoff entry.
+
+### Validation
+
+- Node 20 and Node 22 each report 180 outcomes: 179 passed, one explicitly opt-in ONNX test
+  skipped, zero failed. Application/benchmark typechecks, production build, demo syntax,
+  Compose config, and `git diff --check` pass.
+- `npm audit --omit=optional` and `npm audit --omit=dev --omit=optional` each report zero
+  vulnerabilities. The optional local-ONNX dependency graph remains excluded from release.
+- GitHub CI run `33305397506` passed all five jobs at commit `84c745d`: Node 20, Node 22,
+  deterministic benchmarks, Postgres + pgvector, and the exact production-image Compose
+  demo. The container log records Postgres readiness, the expected 403, one created record,
+  cross-app recall at score 0.922, Hermes context inclusion, and complete cleanup.
+- An independent launch review initially returned no-go because CI tested a different Docker
+  topology. After the workflow and claims were corrected, its focused re-review returned GO
+  with no merge blocker.
+- The production image built locally and its runtime dependency stage audited clean. The
+  existing Colima VM then reproduced its containerd metadata I/O corruption while creating a
+  database container; clean GitHub infrastructure passed the exact path, so this is recorded
+  as a local VM/storage defect rather than an application failure.
+
+### Risks / Follow-ups
+
+- This is suitable for a public beta/developer preview after merging the branch. It is not a
+  production-ready or SOTA certification. Transactional V2 revisions/idempotency/audit,
+  backup/restore, multi-replica and quota drills, and held-out temporal/abstention quality
+  remain required.
+- The principal demo and MCP lifecycle verifier cover the service and adapter contracts, but
+  a real Claude/Codex/Hermes host pilot is still needed before claiming product-level native
+  integration.
+- The default branch is not yet updated and there is no tagged release, published image,
+  product homepage/live playground, logo, screenshot gallery, or launch video. These are
+  launch-distribution gaps, not memory-core correctness gaps.
+- `pgvector/pgvector:pg16` remains a mutable convenience tag; pin a tested multi-architecture
+  digest for a formal release artifact.
+- Kimi's completed architecture verdict remains **MODIFY** and its corrections are in the
+  architecture document. Further source/test review still requires explicit approval to send
+  relevant repository content to the configured external `api.kimi.com` endpoint.

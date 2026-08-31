@@ -732,6 +732,23 @@ test("enhanced provider context is extractive and emits no fabricated answer", a
   for (const memory of built.selectedMemories) {
     assert.ok(texts.includes(memory.text), `buildContext leaked text absent from memories: ${memory.text}`);
   }
+
+  const noFactsService = new MemoryCoreService(provider, {
+    extractor: { id: "empty-but-healthy", extract: async () => [] },
+  });
+  const quarantinedText = "Quarantine canary seven should never enter a prompt";
+  await noFactsService.ingest({
+    observations: [observation("user_enhanced", quarantinedText, { memoryType: "episode" })],
+  });
+  const deprecatedContext = await provider.buildEnhancedContext(
+    "quarantine canary seven",
+    filters,
+    { maxItems: 5 },
+  );
+  assert.ok(
+    !deprecatedContext.contextText.includes(quarantinedText),
+    "the deprecated provider prompt path must enforce no-facts quarantine too",
+  );
   // Was hardcoded to `Date.now() - Date.now()`, i.e. always exactly 0.
   assert.ok(built.processingTime > 0 && Number.isFinite(built.processingTime), `processingTime=${built.processingTime}`);
 });
@@ -747,6 +764,58 @@ test("config accepts every provider kind the factory supports", async () => {
   }
 
   assert.equal(loadConfig({}).providerKind, "in-memory");
+  assert.equal(loadConfig({}).host, "127.0.0.1");
+  assert.equal(loadConfig({}).environment, "development");
+  assert.throws(
+    () => loadConfig({ HOST: "0.0.0.0" }),
+    /Refusing an unauthenticated non-loopback listener/,
+  );
+  assert.equal(loadConfig({
+    HOST: "0.0.0.0",
+    MEMORY_ALLOW_INSECURE_LISTEN: "true",
+  }).allowInsecureListen, true);
+  assert.throws(
+    () => loadConfig({
+      MEMORY_ENV: "production",
+      MEMORY_ALLOW_INSECURE_LISTEN: "true",
+      MEMORY_CORE_API_KEYS: "operator-key",
+      MEMORY_PROVIDER: "postgres",
+      MEMORY_PG_URL: "postgresql://memory-core.invalid/db",
+    }),
+    /forbidden when MEMORY_ENV=production/,
+  );
+  assert.throws(
+    () => loadConfig({ MEMORY_ENV: "production" }),
+    /requires at least one memory-core credential/,
+  );
+  assert.throws(
+    () => loadConfig({ MEMORY_ENV: "production", MEMORY_CORE_API_KEYS: "operator-key" }),
+    /requires MEMORY_PROVIDER=postgres/,
+  );
+  assert.throws(
+    () => loadConfig({
+      MEMORY_ENV: "production",
+      MEMORY_CORE_API_KEYS: "operator-key",
+      MEMORY_PROVIDER: "postgres",
+    }),
+    /requires an explicit MEMORY_PG_URL or DATABASE_URL/,
+  );
+  assert.throws(
+    () => loadConfig({
+      MEMORY_ENV: "production",
+      MEMORY_CORE_API_KEYS: "operator-key",
+      MEMORY_PROVIDER: "postgres",
+      MEMORY_PG_URL: "postgresql://memory-core.invalid/db",
+      MEMORY_PG_AUTO_MIGRATE: "true",
+    }),
+    /forbids application auto-migration/,
+  );
+  assert.equal(loadConfig({
+    MEMORY_ENV: "production",
+    MEMORY_CORE_API_KEYS: "operator-key",
+    MEMORY_PROVIDER: "postgres",
+    MEMORY_PG_URL: "postgresql://memory-core.invalid/db",
+  }).providerKind, "postgres");
   const scopedAuth = loadConfig({
     MEMORY_CORE_API_KEYS: "operator-key",
     MEMORY_CORE_TENANT_API_KEYS: JSON.stringify({

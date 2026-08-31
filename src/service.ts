@@ -170,15 +170,15 @@ export interface MemoryCoreServiceOptions {
   extractor?: Extractor | null;
   /**
    * What to do with an extraction window that produced no facts. "raw" (default)
-   * stores the original observations — an extractor that fails, or judges an
-   * exchange to be filler, can then never delete a memory. "drop" trusts the
-   * extractor's judgement instead, which raises distillation at the risk of
-   * discarding evidence; only set it when you are measuring retention.
+   * stores the original observations as non-prompt-eligible evidence — an
+   * extractor that fails, or judges an exchange to be filler, can then never
+   * silently delete input. "drop" trusts the extractor's judgement instead,
+   * which raises distillation at the risk of discarding evidence.
    */
   extractionFallback?: "raw" | "drop";
   /**
-   * Let unverified (origin="fallback") text into assembled prompt context.
-   * Default false. See the guard in buildContext for why.
+   * Let unverified (origin="fallback" or "no_facts") text into assembled prompt
+   * context. Default false. See the guard in buildContext for why.
    */
   includeUnverified?: boolean;
   /** Optional cross-encoder over provider candidates. Off by default. */
@@ -231,7 +231,8 @@ function extractionGroupKey(obs: MemoryObservation): string {
  * failed. It has been through neither the grounding nor the provenance gate.
  */
 function isUnverified(record: MemoryRecord): boolean {
-  return record.source?.metadata?.extractionOrigin === "fallback";
+  const origin = record.source?.metadata?.extractionOrigin;
+  return origin === "fallback" || origin === "no_facts";
 }
 
 export class MemoryCoreService {
@@ -403,6 +404,7 @@ export class MemoryCoreService {
       }));
 
       let facts: ExtractedFact[] = [];
+      let extractionFailed = false;
       try {
         facts = await extractor.extract({
           turns,
@@ -411,6 +413,7 @@ export class MemoryCoreService {
           context: first.threadId || undefined,
         });
       } catch {
+        extractionFailed = true;
         facts = [];
       }
 
@@ -474,9 +477,28 @@ export class MemoryCoreService {
         });
       }
 
-      // Empty window => extraction failed or found nothing usable; keep the raw turns.
+      // Empty windows keep raw evidence for recovery/operator inspection, but
+      // distinguish an exception from a successful no-facts decision. Neither
+      // state is prompt-eligible by default.
       if (derived.length === 0 && this.extractionFallback === "raw") {
-        for (const index of indexes) ordered.push({ index, observation: observations[index] });
+        const extractionOrigin = extractionFailed ? "fallback" : "no_facts";
+        for (const index of indexes) {
+          const observation = observations[index];
+          ordered.push({
+            index,
+            observation: {
+              ...observation,
+              source: {
+                ...observation.source,
+                metadata: {
+                  ...observation.source.metadata,
+                  extractor: extractor.id,
+                  extractionOrigin,
+                },
+              },
+            },
+          });
+        }
       } else {
         ordered.push(...derived);
       }

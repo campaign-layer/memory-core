@@ -12,7 +12,7 @@ export * from "./embedder.js";
 export * from "./fusion.js";
 export * from "./mmr.js";
 export * from "./rerank.js";
-export { HttpError, postJson, type RetryOptions } from "./http.js";
+export { HttpDeadlineError, HttpError, postJson, type RetryOptions } from "./http.js";
 
 export type Metadata = Record<string, unknown>;
 

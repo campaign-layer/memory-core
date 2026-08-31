@@ -703,7 +703,8 @@ export class EnhancedMemoryProvider implements MemoryProvider {
       // Same rule the service applies: text an extractor never rewrote or
       // grounded must not reach a prompt. An attacker can force that path by
       // inducing an unparsable model response, which stores the raw turn.
-      if (hit.memory.source?.metadata?.extractionOrigin === "fallback") continue;
+      const extractionOrigin = hit.memory.source?.metadata?.extractionOrigin;
+      if (extractionOrigin === "fallback" || extractionOrigin === "no_facts") continue;
       contextLines.push(`- [${hit.memory.memoryType}] ${hit.memory.text} (score: ${hit.score.toFixed(3)})`);
       selectedMemories.push({
         id: hit.memory.id,

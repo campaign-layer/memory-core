@@ -7,8 +7,8 @@ An HTTP + MCP memory service for AI agents. Ingest typed observations, retrieve 
 hybrid BM25 + vector search, and build a prompt-ready context block. Storage is pluggable
 behind one provider interface: in-memory, JSON file, or Postgres + pgvector.
 
-Pre-1.0. Retrieval quality is measured rather than asserted, and the measurements include
-the cases where we lose. Every number below names the command that produces it.
+Public beta, pre-1.0. Retrieval quality is measured rather than asserted, and the measurements
+include the cases where we lose. Every number below names the command that produces it.
 
 ---
 
@@ -56,12 +56,45 @@ the cases where we lose. Every number below names the command that produces it.
 Every command and every response below was executed against a running server on Node 22.14
 before publishing; the outputs are copied from that session, not written by hand.
 
+### Shared Claude → Codex → Hermes principal demo
+
+The checked-in Compose stack starts Postgres + pgvector and one authenticated memory service.
+The demo proves that three separately authenticated agent principals can share one actor-scoped
+memory while an app credential cannot impersonate another:
+
 ```bash
 git clone https://github.com/campaign-layer/memory-core
 cd memory-core
-npm install
-npm run dev              # tsx src/server.ts, listens on 0.0.0.0:7401
+docker compose up --build -d
+node examples/shared-agent-demo.mjs
 ```
+
+Expected final line:
+
+```text
+PASS: one actor memory crossed Claude -> Codex -> Hermes principals without sharing credentials.
+```
+
+This script exercises the same principal boundary used by the integrations; it does not launch
+the three third-party agent CLIs. Use the [integration guide](docs/INTEGRATION_GUIDE.md) for
+their MCP configuration. CI separately runs the MCP lifecycle verifier.
+
+The demo credentials are deliberately public and the service port is published only on
+`127.0.0.1`. Replace them before any non-local use. `docker compose down` stops the stack and
+preserves the Postgres volume.
+
+### Minimal in-memory walkthrough
+
+```bash
+git clone https://github.com/campaign-layer/memory-core
+cd memory-core
+npm ci
+npm run dev   # development-only; defaults to 127.0.0.1:7401
+```
+
+This minimal walkthrough has no API key and is safe only on loopback. For persistent storage
+and distinct principal keys for Claude, Codex, and Hermes, use the
+[local self-hosting guide](docs/deployment.md#local-self-hosting).
 
 ```bash
 curl -s localhost:7401/health
@@ -108,7 +141,7 @@ Turn on semantic retrieval. `MEMORY_EMBEDDER=local` downloads a ~35 MB ONNX mode
 then runs offline; `hash` is deterministic and needs no download.
 
 ```bash
-MEMORY_EMBEDDER=local npm run dev
+HOST=127.0.0.1 MEMORY_EMBEDDER=local npm run dev
 curl -s localhost:7401/ready
 # ..."provider":{"ok":true,"provider":"in-memory"}...
 ```
@@ -451,7 +484,9 @@ unrelated keys, so unknown names cannot be rejected; validate the deployment man
 | var | default | meaning |
 |---|---|---|
 | `PORT` | `7401` | HTTP port. 1–65535 or startup throws. |
-| `HOST` | `0.0.0.0` | bind address |
+| `HOST` | `127.0.0.1` | bind address; an unauthenticated non-loopback bind fails closed |
+| `MEMORY_ENV` | `development` | `development` \| `test` \| `production`; production enforces credentials, Postgres, an explicit database URL, and external migrations |
+| `MEMORY_ALLOW_INSECURE_LISTEN` | `false` | development-only escape hatch for an unauthenticated non-loopback bind; forbidden in production |
 | `MEMORY_PROVIDER` | `in-memory` | `in-memory` \| `file` \| `enhanced` \| `dual-layer` \| `postgres` |
 | `MEMORY_FILE_PATH` | `./data/memory-core.json` | `file` provider path |
 | `MEMORY_CORE_API_KEYS` | unset | comma-separated **global operator** keys; each can access every tenant and run compaction |
@@ -469,16 +504,18 @@ unrelated keys, so unknown names cannot be rejected; validate the deployment man
 | `MEMORY_RERANKER_MIN_SCORE` | `0` | final cross-encoder relevance gate, 0–1; calibrate on a development split |
 | `MEMORY_EXTRACTOR` | `none` | `none` (passthrough — stores each observation verbatim) \| `llm` |
 | `MEMORY_EXTRACTOR_BASE_URL` | `https://api.openai.com/v1` | any OpenAI-compatible chat endpoint |
-| `MEMORY_EXTRACTOR_API_KEY` | unset | key for the above |
+| `MEMORY_EXTRACTOR_API_KEY` | unset | key for the above; falls back to `OPENAI_API_KEY` |
 | `MEMORY_EXTRACTOR_MODEL` | `gpt-4o-mini` | extraction model |
 | `MEMORY_EXTRACTOR_BATCH_SIZE` | unset | turns per extraction call, 1–200 |
 
 `VOYAGE_API_KEY` is read by the Voyage embedder and reranker; `OPENAI_API_KEY` is read by the
 OpenAI embedder.
 
-Reranking is service-level, so REST, MCP recall, and `buildContext` get the same order for
-every provider. It recalls `max(50, limit*5)` candidates capped at 100, sends only stored
-memory text to the cross-encoder, and uses the returned relevance score as the public score.
+Reranking is service-level, so REST, remote-mode MCP recall, and `buildContext` get the same
+order for every HTTP-service provider. Embedded MCP constructs its own basic provider and
+does not load the HTTP service's embedder, reranker, extractor, or Postgres configuration. The
+service recalls `max(50, limit*5)` candidates capped at 100, sends only stored memory text to
+the cross-encoder, and uses the returned relevance score as the public score.
 Each hosted attempt is capped at five seconds with no inline retry. An outage logs once,
 opens a 60-second cooldown, and falls back to the provider's exact prior ranking. Default
 `none` makes no hosted call and preserves existing behavior.
@@ -588,7 +625,7 @@ benchmark number: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ```bash
 docker build -t memory-core .
-docker run -p 7401:7401 memory-core
+docker run -p 127.0.0.1:7401:7401 memory-core
 
 # opt in to the larger native local-ONNX dependency tree
 docker build \
@@ -596,7 +633,7 @@ docker build \
   -t memory-core-local-onnx .
 
 # with file persistence
-docker run -p 7401:7401 \
+docker run -p 127.0.0.1:7401:7401 \
   -e MEMORY_PROVIDER=file \
   -e MEMORY_FILE_PATH=/app/data/memory-core.json \
   -v "$(pwd)/data:/app/data" \
@@ -630,24 +667,28 @@ Deployment guidance, docker-compose, Kubernetes and the operational limits:
   `VOYAGE_API_KEY`; the benchmark refuses to label a fallback run as reranked. Run the
   credentialed context command in `bench/README.md` and tune its score gate on a separate
   development split.
-- **Authentication is opt-in.** Put normal agent keys in `MEMORY_CORE_PRINCIPAL_API_KEYS`.
+- **Authentication is optional only on loopback by default.** Put normal agent keys in `MEMORY_CORE_PRINCIPAL_API_KEYS`.
   `MEMORY_CORE_TENANT_API_KEYS` is a privileged tenant-admin/identity-assertor surface and
   `MEMORY_CORE_API_KEYS` is global operator access. If all three are empty, HTTP
-  authentication is disabled. Principal grants bind tenant, effective space, app, and actor;
-  a thread remains caller-selected within that bound actor.
+  authentication is disabled, but startup rejects a non-loopback bind unless the explicit
+  development-only insecure-listen override is set. `MEMORY_ENV=production` always requires
+  credentials. Principal grants bind tenant, effective space, app, and actor; a thread remains
+  caller-selected within that bound actor.
 - **The rate limiter is per-process**, so a fleet-wide quota multiplies by replica count.
   Reverse-proxy addresses are trusted only when `MEMORY_TRUST_PROXY_HOPS` is set correctly.
 
 ## Docs
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — what is structurally wrong with the current
-  design and the target shape. **Start here.**
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the verified gap register and transactional
+  evidence/version/current-head target architecture. **Start here.**
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) — every harness, metric definitions, full results.
 - [`bench/README.md`](bench/README.md) — synthetic dataset design and label integrity.
 - [`docs/providers.md`](docs/providers.md) — provider internals and scoring formulas.
 - [`docs/WORKING_OVERVIEW.md`](docs/WORKING_OVERVIEW.md) — the write path and the read path.
-- [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) — integrating from an application.
-- [`docs/deployment.md`](docs/deployment.md) — running it, and the limits before you do.
+- [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) — application integration plus
+  local Claude, Codex, and Hermes connections.
+- [`docs/deployment.md`](docs/deployment.md) — secure local self-hosting and the limits before
+  production deployment.
 - [`src/integrations/README.md`](src/integrations/README.md) — MCP and agent frameworks.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — tests, benchmarks, adding a provider.
 

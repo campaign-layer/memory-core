@@ -34,7 +34,7 @@
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/service.test.ts src/retrieval/*.test.ts src/integrations/*.test.ts src/providers/hybrid-search.test.ts src/extraction/*.test.ts",
+    "test": "tsx --test src/client.test.ts src/service.test.ts src/retrieval/*.test.ts src/integrations/*.test.ts src/providers/hybrid-search.test.ts src/extraction/*.test.ts",
     "test:pg": "tsx --test src/providers/postgres-provider.test.ts",
     "test:all": "npm test && npm run test:pg",
     "bench": "tsx bench/run.ts",
@@ -43,6 +43,7 @@
     "bench:context": "tsx bench/context.ts --size=small",
     "bench:dataset": "tsx bench/dataset/generate.ts",
     "bench:typecheck": "tsc -p bench/tsconfig.json --noEmit",
+    "demo:shared": "node examples/shared-agent-demo.mjs",
     "verify:mcp": "tsx src/integrations/verify-mcp.ts",
     "integrations:schemas": "tsx src/integrations/generate-schemas.ts",
     "mcp": "tsx src/integrations/mcp-server.ts"
@@ -60,7 +61,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^20.19.27",
     "@types/pg": "8.20.0",
-    "tsx": "^4.20.5",
+    "tsx": "4.23.13",
     "typescript": "^5.6.3"
   }
 }
