@@ -3,6 +3,13 @@
 Running memory-core. Read
 [Limits to know before you deploy](#limits-to-know-before-you-deploy) first.
 
+For exact-version Claude Code, Codex CLI, LangChain, LangGraph, OpenAI Agents,
+AutoGen, CrewAI, Hermes, and OpenClaw host checks plus the detached Postgres
+fault/endurance campaign, use the
+[framework compatibility runbook](../bench/framework-compat/README.md). Its L0,
+L1, L2, and L3 labels are deliberately separate; a client accepting a config
+does not prove tool discovery or execution.
+
 Earlier revisions of this file documented CORS settings, `LOG_LEVEL`, `NODE_ENV`-driven
 behaviour, winston logging, a `prom-client` `/metrics` endpoint, `FILE_BACKUP_*`,
 `ENHANCED_*`, `DUAL_LAYER_*` variables, and `/v1/memory/export` + `/v1/memory/import` routes.
@@ -363,7 +370,31 @@ Use `/ready` for readiness and `/health` for liveness — that distinction matte
 `/health` is static and would keep a pod with a dead database in the load-balancer pool.
 
 Run the migration as a `Job` rather than relying on `MEMORY_PG_AUTO_MIGRATE` with three
-replicas racing each other. It is idempotent, but a single ordered application is cleaner.
+replicas racing each other. The `npm run migrate` runner is ledger-idempotent and serialized,
+but the individual SQL files are immutable transitions rather than replayable scripts; a
+single ordered application is cleaner.
+
+Migration `003_concurrent_dedupe.sql` is a deploy-before-code migration. Stop or drain every
+old writer, back up the database, run the migration job to completion, and only then start the
+new application replicas. The migration holds a table lock that blocks writes while it:
+
+1. validates that every legacy decay policy has a recognized kind and fails closed instead of
+   retaining an active row that default reads would hide;
+2. detects any SHA-256 collision and fails closed;
+3. deterministically chooses one active winner per tenant/workspace/app/actor/thread exact key,
+   merges monotonic timestamps, confidence, importance, metadata, and feedback counters, and
+   preserves losing rows as `superseded` audit records; and
+4. builds five PostgreSQL 14-compatible partial unique expression indexes.
+
+Reads remain available during this migration, but the write pause grows with the size of the
+`memories` table and its active duplicate count. Measure it on a restored production snapshot
+before scheduling the maintenance window. Do not deploy the new binary first: without all five
+indexes, its atomic `ON CONFLICT` target deliberately fails rather than falling back to the old
+racy check-then-insert path. `/ready` also remains false when any expected index is missing,
+invalid, not ready, non-unique, attached to the wrong table, or structurally inconsistent with
+its expected scope key and predicate. The migration runner disables the normal request
+statement timeout for schema work but bounds lock acquisition at 30 seconds; a lock-timeout
+failure is a failed deployment job, not permission to start the new binary.
 
 The memory-space upgrade backfills legacy rows into each record owner's personal space. This
 is intentionally privacy-preserving but narrows old `app`/`workspace` sharing. Before rollout,

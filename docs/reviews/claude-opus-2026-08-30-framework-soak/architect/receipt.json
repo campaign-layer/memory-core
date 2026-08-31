@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "status": "HISTORICAL_INCOMPLETE_CAPTURE",
+  "clearanceEligible": false,
+  "mode": "read-only architecture review",
+  "reviewerRole": "architect",
+  "cliVersion": "2.1.220",
+  "requestedModel": "opus",
+  "actualModel": "claude-opus-5",
+  "effort": "high",
+  "sourceManifestSha256": "3e606dfa108eab66d12d277f21cf6fb6a803a33a4b73c8b787d9fe77cfcc37ca",
+  "promptSha256": "1e87f33590d609f34189ce6172cc2894235f7de0cbb7decdc06b725bd3f971c6",
+  "sessionId": "06911d81-03d0-4c47-ae57-8254af23a81d",
+  "exitStatus": 0,
+  "durationApiMs": 501289,
+  "costUsd": 2.273423,
+  "turns": 28,
+  "webRequests": 0,
+  "permissionDenials": [],
+  "rawCaptureComplete": false,
+  "verdict": "BLOCK",
+  "note": "The read-only review completed and its blockers were verified against source, but the outer command transcript was truncated before it was persisted byte-for-byte. This receipt is historical evidence only and must not be treated as Claude clearance. A fresh adversarial review with a complete raw receipt is required against the post-canary frozen candidate."
+}

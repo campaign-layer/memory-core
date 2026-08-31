@@ -255,20 +255,25 @@ The only durable, multi-replica-safe backend.
 createdb memory_core_dev
 psql -d memory_core_dev -f migrations/001_init.sql
 psql -d memory_core_dev -f migrations/002_memory_spaces.sql
+psql -d memory_core_dev -f migrations/003_concurrent_dedupe.sql
 MEMORY_PROVIDER=postgres MEMORY_PG_URL=postgres://localhost:5432/memory_core_dev npm run dev
 npm run test:pg   # provider tests, needs a reachable database
 ```
 
-PostgreSQL 14+, pgvector 0.5+. The migration is idempotent and re-runnable, and pgvector is
-optional at migrate time: it wraps `CREATE EXTENSION vector` in an exception handler and the
-full-text path installs and works without it.
+PostgreSQL 14+, pgvector 0.5+. The `npm run migrate` runner is ledger-idempotent, advisory-lock
+serialized, and checksum-verifies every ordered file. The raw SQL files are immutable schema
+transitions, not individually replayable scripts; do not rerun migration 003 manually after it
+has committed. pgvector is optional at migrate time: migration 001 wraps `CREATE EXTENSION
+vector` in an exception handler and the full-text path installs and works without it.
 
 **Schema.** `memories` carries two generated stored columns:
 
 - `search_vector tsvector` — `setweight(summary,'A') || setweight(text,'B')`, so a curated
   one-liner outranks an incidental mention deep in the body. Behind a partial GIN index.
-- `text_hash` — `md5(lower(whitespace-collapsed text))`, giving index-backed exact dedupe
-  instead of an O(N) `lower(text)` scan.
+- `text_hash` — the legacy MD5 lookup key retained for rollback compatibility. Authoritative
+  exact dedupe uses five SHA-256 partial unique expression indexes from migration 003, one for
+  each tenant/workspace/app/actor/thread visibility locus. Postgres arbitrates create versus
+  reinforcement in one `INSERT ... ON CONFLICT DO UPDATE` statement across replicas.
 
 Indexes cover both `(tenant_id, app_id)` provenance lookups and `(tenant_id, space_id)` access
 paths; most are partial on `status = 'active'` because virtually all reads are. Metadata uses
@@ -343,8 +348,9 @@ Constructor options: `pool` (a caller-owned pool is never ended by `close()`), `
 startup parameter to avoid an extra round trip), `embedOnIngest` (true),
 `embedderCooldownMs` (60000), `rrfK` (60),
 `lexicalWeight` / `vectorWeight` (1), `candidateMultiplier` (8, capped at 1000 candidates),
-`hideExpiredOnRead` (true — filters decay-expired rows out of reads instead of waiting for
-`compact()`), `maxListRows` (1000, a safety cap on the otherwise unbounded `listByActor`),
+`hideExpiredOnRead` (true — filters decay-expired rows out of reads and archives an expired
+exact match before creating its replacement; false keeps the row visible and reinforces that
+same id), `maxListRows` (1000, a safety cap on the otherwise unbounded `listByActor`),
 `autoMigrate` (false), `migrationFile` (single-file override; the default applies all bundled
 versions).
 
@@ -357,7 +363,11 @@ Operational notes:
   transaction opens; a network embedder has no business holding a transaction.
 - `MEMORY_PG_AUTO_MIGRATE=true` takes a Postgres advisory lock, verifies SHA-256 checksums,
   applies only ledger-pending ordered migrations, and provisions a missing configured
-  embedding dimension before the production HTTP listener opens.
+  embedding dimension before the production HTTP listener opens. Migration work temporarily
+  disables the ordinary request `statementTimeoutMs` so large index builds can finish, while a
+  30-second lock timeout prevents it from waiting forever to enter the maintenance window.
+  Production deployments should still drain writers and run `npm run migrate` as a one-shot
+  job before starting the new binary.
 - Search-time vector table/embedder failures log once, enter a cooldown, and execute the
   lexical CTE without exposing hosted-provider details to HTTP callers.
 - `DEFAULT_PG_URL` is a developer-machine localhost URL. Always set `MEMORY_PG_URL` or

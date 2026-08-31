@@ -19,6 +19,32 @@ and equally true of the two public datasets. It means:
   `bench/` harness over the same fixture; `mem0 OSS 2.0.14` was driven through the LoCoMo
   harness over the same conversations. Neither number is borrowed.
 
+### At-a-glance comparison with other memory systems
+
+These are the only defensible cross-system scores currently available because the compared
+systems were executed by us through the same harness. Rows from different datasets are not
+comparable with each other.
+
+| Dataset and metric | Memory Core | Compared system | Honest result |
+|---|---:|---:|---|
+| Synthetic R@1 | hybrid **.489** | supermemory .409 | Memory Core wins on our self-authored dataset; weakest evidence. |
+| Synthetic R@5 | hybrid **.830** | supermemory .807 | Memory Core hybrid wins; Memory Core BM25-only loses at .625. |
+| Synthetic R@10 | hybrid **.955** | supermemory .898 | Memory Core hybrid wins retrieval depth. |
+| LoCoMo R@1 | hybrid .344 | mem0 OSS 2.0.14 **.345** | Effectively tied; mem0 is higher. |
+| LoCoMo R@5 | hybrid .620 | mem0 **.635** | mem0 wins early precision. |
+| LoCoMo R@10 | hybrid **.709** | mem0 .694 | Memory Core wins retrieval depth. |
+| LoCoMo R@30 | hybrid **.817** | mem0 .783 | Memory Core wins retrieval depth. |
+| LoCoMo QA accuracy, matched n=233 | hybrid .451 | mem0 **.476** | mem0 wins downstream QA in this reader setup. |
+
+Memory Core has **not** been run through this harness against Zep/Graphiti, Letta, LangMem or
+other memory projects, and supermemory has not been run through the public-dataset harnesses.
+Those systems therefore have no score here. “Not measured” is not a loss or a win.
+
+This table measures retrieval and one constrained QA reader. It does not establish that a
+Claude, Codex, OpenAI Agents, Hermes or other autonomous agent completes more work with
+Memory Core enabled. The paired memory-on/off and longitudinal design for that question is
+[`AGENT_EVALUATION.md`](./AGENT_EVALUATION.md).
+
 ### What you can reproduce, and what you cannot
 
 | suite | harness | reproducible from this checkout? |
@@ -359,8 +385,9 @@ this reader, and a QA delta below the width of these intervals is not a result.
 10 conversations, **n = 1,531 answerable questions**, against **mem0 OSS 2.0.14** which we
 ran ourselves through the same harness over the same conversations.
 
-> **Our harness, not the leaderboard.** Same caveat as above, and the same
-> not-reproducible-from-this-checkout limitation.
+> **Our harness, not the leaderboard.** Same caveat as above. The harness and result
+> artifacts are committed; reproduction requires downloading the LoCoMo dataset and creating
+> the pinned Python environment.
 
 | system | R@1 | R@5 | R@10 | R@30 | MRR | nDCG@10 |
 |---|---|---|---|---|---|---|
@@ -445,12 +472,19 @@ through a normalized-text index.
 ## What this page does not cover
 
 - **The `postgres` provider has no measured retrieval number.** It is not registered in
-  `bench/systems/index.ts`, and it is the only durable backend.
-- **`buildContext` is unmeasured** — the endpoint agents actually call. Profile prepending,
-  greedy budget selection and character-based budgeting are all unevaluated.
+  `bench/systems/index.ts`, and it is the only durable backend. The fault canary used its
+  lexical path for compatibility and persistence, not a labeled quality corpus.
+- **`buildContext` has only an internal regression**, not a public end-to-end agent score.
+  On the repository-authored small fixture it retained 76.92% of labeled evidence, produced
+  72.73% all-gold contexts and zero character-budget violations, but stale evidence outranked
+  current evidence in 37.5% of update cases and every abstention case leaked some evidence.
+  These are regression signals, not proof that an agent's answer or task outcome improves.
 - **The LLM extractor (`MEMORY_EXTRACTOR=llm`) is unmeasured.** Every number on this page was
   produced with extraction off, which is the default.
 - **No multilingual or long-document evaluation** anywhere.
+- **No paired autonomous-agent outcome experiment.** Framework execution, retrieval ranking
+  and service uptime are measured separately; none is a causal memory-on/off task-success
+  result.
 
 ## Rules for quoting any of this
 

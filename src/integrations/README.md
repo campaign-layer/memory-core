@@ -3,6 +3,11 @@
 Drop-in memory for agents. Six tools, one zod source of truth (`tools.ts`), and adapters
 generated from it — Anthropic, OpenAI-compatible, MCP, OpenClaw, Hermes, or your own loop.
 
+The exact-version support matrix and L0–L3 definitions are maintained in
+[`docs/INTEGRATION_GUIDE.md`](../../docs/INTEGRATION_GUIDE.md#verified-framework-matrix).
+Support levels are intentionally route-specific: a generic MCP lifecycle pass does not turn
+Claude Code or Codex configuration acceptance into an autonomous-agent pass.
+
 ## The tool surface
 
 | Tool | What it does | Why an agent needs it |
@@ -195,8 +200,11 @@ validation error rather than throwing.
 
 For the OpenAI **Agents SDK** (`@openai/agents`, also not a dependency),
 `toOpenAIAgentsTools(ctx)` returns `{ name, description, parameters, zodParameters, execute }`
-descriptors to spread into its `tool({...})` helper. Field names are from that package's
-docs and are **not** checked at build time here — verify against your installed version.
+descriptors to spread into its `tool({...})` helper. The compatibility harness pins 0.17.0
+and exercises both its real MCP client and a real `Runner` using these native descriptors.
+The runner's model is deterministic and credential-free, so this proves SDK execution—not
+autonomous model selection or task improvement. Re-run the versioned harness after upgrading
+the SDK because it remains an external, non-runtime dependency of this package.
 
 ## 4. Custom agent via the SDK
 
@@ -247,8 +255,9 @@ transaction; see [Scoped lifecycle REST API](#scoped-lifecycle-rest-api).
 
 ## 5. OpenClaw
 
-OpenClaw (`github.com/openclaw/openclaw`) is a TypeScript AI agent gateway. Verified
-against its docs on 2026-07-29.
+OpenClaw (`github.com/openclaw/openclaw`) is a TypeScript AI agent gateway. The stdio MCP
+route reached L1 discovery against 2026.7.1-2 in the framework canary. The native plugin
+route below remains contract-only.
 
 **MCP is the recommended path.** Note the config key is `mcp.servers`, **not** the
 `mcpServers` that Claude Desktop uses — a lot of third-party blog posts get this wrong.
@@ -269,7 +278,7 @@ Config lives at `~/.openclaw/openclaw.json`:
           "MEMORY_PROVIDER": "file",
           "MEMORY_FILE_PATH": "/Users/you/.memory-core/store.json"
         },
-        "supportsParallelToolCalls": true,
+        "supportsParallelToolCalls": false,
         "toolFilter": {
           "include": ["remember", "recall", "build_context", "forget", "supersede", "feedback"]
         }
@@ -345,7 +354,7 @@ mcp_servers:
       MEMORY_ACTOR_ID: peter
       MEMORY_CORE_URL: http://127.0.0.1:7401
       MEMORY_CORE_API_KEY: sk-mc-abc123
-    supports_parallel_tool_calls: true
+    supports_parallel_tool_calls: false
     tools:
       include: [remember, recall, build_context, forget, supersede, feedback]
       prompts: false
@@ -354,7 +363,9 @@ mcp_servers:
 
 Generate it with `hermesMcpConfigYaml()` from `./adapters/hermes.js`. Hermes namespaces MCP
 tools as `mcp_<server>_<tool>`, so the model sees `mcp_memory_core_recall`. Reload without a
-restart via `/reload-mcp`.
+restart via `/reload-mcp`. The real Hermes 0.19.0 host reached L1 connection and six-tool
+discovery in the framework canary; deterministic lifecycle execution through Hermes itself
+and model-driven use remain untested.
 
 **Native Python plugin.** `./adapters/hermes-plugin/` is a Hermes tool plugin that talks to
 a memory-core service over HTTP using only the Python standard library:
@@ -393,9 +404,10 @@ hardcoded `~/.hermes`.
 
 ## LangChain
 
-Skipped: `langchain` is not in `node_modules`, and this task does not add dependencies.
-`toOpenAITools()` plus `dispatch()` covers a `StructuredTool` wrapper in a few lines if you
-want one.
+The framework harness pins `@langchain/mcp-adapters` 1.1.4 and LangGraph 1.4.13 in its own
+lockfile. Both reached L2 by discovering and executing the complete lifecycle against the
+remote service. They remain bench-only dependencies; the production package does not force
+LangChain into an application that does not use it.
 
 ## Verified vs not
 
@@ -408,6 +420,11 @@ want one.
 - Server process exits cleanly when the client disconnects
 - Bad input is rejected before reaching a handler (MCP SDK validation, then zod)
 - Remote mode against a live memory-core HTTP service with `x-api-key` auth enforced
+- LangChain MCP adapters 1.1.4, LangGraph 1.4.13, OpenAI Agents 0.17.0 (MCP and native
+  descriptors/real runner), AutoGen 0.7.5 and CrewAI 1.15.18 at L2 in the exact-version
+  framework canary
+- Hermes Agent 0.19.0 and OpenClaw 2026.7.1-2 at L1 host connection/tool discovery
+- Claude Code 2.1.251 and Codex CLI 0.151.0 at L0 isolated configuration acceptance/readback
 - The Hermes Python handlers against a live memory-core service, happy path and error paths
 - `node:test` coverage over schemas, dispatch, identity pinning, and the
   Anthropic/OpenAI/generic exports
@@ -418,10 +435,13 @@ want one.
 - OpenClaw `defineToolPlugin` / `tool(...)` field names, and whether plain JSON Schema is
   accepted where the docs show typebox
 - Whether OpenClaw's stdio env filter passes `MEMORY_*` vars through
-- OpenAI Agents SDK `tool({...})` field names
 - The Hermes plugin loading inside a real Hermes install
 - Anthropic and OpenAI adapters are structurally typed against their SDKs; the wire shapes
   follow current docs but no live API call was made
+
+**Not verified as an outcome:** no host has a retained L3 autonomous model-selection trace or
+a paired memory-on/off task-success result. See
+[`docs/AGENT_EVALUATION.md`](../../docs/AGENT_EVALUATION.md).
 
 **Deliberately not built:** OpenClaw `MemoryCapability` (interface unpublished) and Hermes
 `MemoryProvider` (documented, but an exclusive slot and a product decision).

@@ -78,7 +78,10 @@ export function hermesMcpConfig(options: HermesMcpOptions): {
         args: options.args ?? ["tsx", "src/integrations/mcp-server.ts"],
         ...(options.cwd ? { cwd: options.cwd } : {}),
         env,
-        supports_parallel_tool_calls: true,
+        // remember/feedback are safe individually, but remote supersede is a
+        // create-then-retire workflow. Do not invite a host to overlap revision
+        // calls until the service exposes one transactional revision endpoint.
+        supports_parallel_tool_calls: false,
         tools: {
           include: MEMORY_TOOLS.map((tool) => tool.name),
           prompts: false,

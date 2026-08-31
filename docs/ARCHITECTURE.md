@@ -9,6 +9,20 @@ fixed, and benchmarking against public datasets changed the priority order. What
 follows is the current state; the original analysis is kept intact underneath
 because the reasoning still explains *why* the design was wrong.
 
+### Agent-outcome gate (2026-08-31)
+
+A fresh local Kimi architecture/experiment review returned **MODIFY — evidence gap**. The
+repository demonstrates retrieval regressions, pinned L0/L1/L2 framework integration and a
+fault-qualification harness, but no autonomous L3 result or causal O1/O2 task uplift. The
+reviewed experiment matrix and pass gates are in
+[`AGENT_EVALUATION.md`](./AGENT_EVALUATION.md).
+
+The resulting architecture priorities are: immutable evidence plus series/version/current-
+head CAS; explicit contradiction/conflict state; calibrated `answerable | abstain | conflict`;
+auditable memory-use-to-outcome attribution; and role-scoped writes. A graph projection can
+support multi-hop retrieval, but it must remain rebuildable and cannot become the authority
+for truth, visibility, task leases or coordination.
+
 **Fixed or verified**
 
 | Was | Now |
@@ -108,8 +122,9 @@ Kimi architecture turn. Kimi returned **MODIFY**: retain the ledger plus bounded
 projection, but do not let a rebuildable projection decide prompt visibility or truth; narrow
 the uniqueness claim to one exact visibility tuple; define bitemporal precedence, legacy
 collision handling, and the file crash boundary. Those changes are incorporated below.
-Follow-up source-level Kimi review is paused pending explicit approval to transmit relevant
-source and tests to the CLI's external `api.kimi.com` endpoint. This is not Kimi sign-off.
+Updated on 2026-08-31: the user authorized a sanitized frozen-source export. Kimi completed
+the agent-outcome architecture/experiment review with **MODIFY — evidence gap**; this is not
+source-code or production sign-off.
 
 ### Complete current gap register
 
@@ -118,7 +133,7 @@ source and tests to the CLI's external `api.kimi.com` endpoint. This is not Kimi
 | P0-A closed | Configured server defaults to loopback and rejects an unauthenticated non-loopback bind | Preserve the startup matrix and its production-mode tests |
 | P0-A closed | `MemoryCoreClient` now rejects redirects, bounds the whole response and body, and requires HTTPS except loopback | Preserve redirect/deadline/body/URL tests |
 | P0-A containment | Extractor exceptions and successful no-facts windows are distinctly labelled and excluded from prompts by default | Replace V1 containment with durable V2 evidence/candidate state |
-| P2 | Dedupe and writes are TOCTOU; concurrent identical ingest duplicates and a batch can partially commit | One idempotent, all-or-nothing store command |
+| P2 partial | PostgreSQL exact-text dedupe is atomic; service batches can still partially commit and non-Postgres providers use the portable service path | Persisted idempotency plus one all-or-nothing store command |
 | P2 | Remote supersede is create → feedback → retire across requests | One compare-and-swap revision transaction |
 | P2 | Extracted facts retain transient turn indexes but not durable source text/spans | Every accepted version links to immutable evidence ids and hashes/spans |
 | P2 | Direct provider `getById` can be called without a scope | Every store operation requires a resolved access context |

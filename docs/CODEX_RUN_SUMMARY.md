@@ -519,3 +519,190 @@ and separate verified beta readiness from production/SOTA claims.
 - Kimi's completed architecture verdict remains **MODIFY** and its corrections are in the
   architecture document. Further source/test review still requires explicit approval to send
   relevant repository content to the configured external `api.kimi.com` endpoint.
+
+## 2026-08-30 — exact-framework compatibility and endurance qualification
+
+### Scope
+
+Build a reproducible, fail-closed way to test the real Memory Core service against multiple
+agent frameworks on a dedicated bench host, then run a fault-injected canary before starting
+a detached 24-hour qualification. Compatibility evidence is graded L0–L3 so accepting a
+configuration is never reported as real tool execution.
+
+### Changes
+
+- Added exact-version probes for the MCP TypeScript SDK, LangChain, LangGraph, OpenAI Agents
+  MCP, the native OpenAI Agents adapter and real scripted Runner, AutoGen, CrewAI, Claude
+  Code, Codex CLI, Hermes, and OpenClaw. The deterministic hosts exercise the complete six-
+  tool lifecycle and corroborate state through authenticated REST reads.
+- Added a production-shaped, loopback-only Postgres/pgvector Compose stack with a separate
+  one-shot migrator, immutable database image requirement for qualified profiles, bounded
+  resources/logs, exact principal grants, and source revision/tree labels on the application
+  image. Ordinary production Docker builds still work without qualification labels.
+- Added a mixed-principal workload, isolation and scope preflights, concurrent dedupe and
+  feedback checks, an acknowledged-ID persistence oracle, monotonic timing, throughput and
+  scheduler gates, periodic audits, resource samples, and explicit application/database
+  restart and SIGKILL recovery tests.
+- Added a fail-closed campaign controller. It independently rechecks clean Git source, the
+  runtime contract, running image provenance, expected framework versions, scheduled probe
+  slots and faults, container generations, resource coverage, final logs, and cryptographic
+  artifact completeness. A terminal completion marker is written only after the final
+  summary and evidence manifest.
+- Added a sanitized review-bundle exporter with a strict allowlist, stable-copy checks,
+  streaming hashes, credential-derived secret scanning, and terminal/manifest verification.
+  Live credentials, isolated CLI homes, and framework homes are never exportable.
+- Disabled host-advertised parallel tool calls for Hermes and OpenClaw while remote
+  supersede remains a create-then-retire workflow. Added a regression test and a Node 24 CI
+  lane for harness syntax plus fail-closed configuration generation.
+
+### Validation before remote execution
+
+- Node 22.14.0: 181 outcomes, 180 passed, one opt-in ONNX test skipped, zero failed.
+- Root typecheck, benchmark typecheck, production build, every JavaScript harness syntax
+  check, the Python probe compile check, and `git diff --check` pass.
+- The generator's source, bounds, output-containment, version, and Compose contract rejection
+  cases were exercised locally. The full Docker/framework/fault path is intentionally left to
+  the dedicated Linux bench host and must not be inferred from these local checks.
+
+### Qualification status
+
+The attested bench canary, sanitized Claude Opus adversarial review, and detached 24-hour
+primary run are the next gates. Until the canary is green and the primary campaign reports
+`PASSED`, this section records implementation readiness only—not framework certification,
+production qualification, or SOTA memory quality.
+
+Updated on 2026-08-31: the repaired 900-second canary completed `CANARY_PASSED`; see the next
+run entry. The frozen Claude review and 24-hour primary qualification remain open.
+
+### Canary defect and atomic-dedupe repair
+
+- A fresh exact-runtime canary passed all eleven framework startup probes and every runtime
+  inventory gate, then failed closed in its concurrency preflight: 20 acknowledged identical
+  writes produced three returned/active ids. The run finalized `FAILED`, `qualified:false`,
+  with zero isolation violations, zero acknowledged losses, clean final audits, and atomic
+  feedback `0 -> 20`. Its 42-file, 1.90 MB sanitized evidence bundle verifies against
+  `SHA256SUMS`; it is retained as negative evidence, not launch clearance.
+- Replaced Postgres service-level check-then-insert dedupe with a provider-native atomic
+  create-or-reinforce operation. Five scope-specific partial unique expression indexes now
+  exactly match the tenant/workspace/app/actor/thread visibility identity and use SHA-256;
+  normalized-text equality remains a fail-closed collision guard.
+- Migration 003 blocks writers, detects hash collisions, deterministically consolidates
+  existing active duplicates, merges monotonic fields/metadata/feedback counters, preserves
+  losers as superseded audit rows, and builds the invariant without a PostgreSQL 14 heap
+  rewrite. Readiness requires all five indexes to be unique, ready, and valid.
+- Active-but-logically-expired rows are archived in the same transaction before replacement,
+  preserving time/inactivity decay semantics. Deadlock and serialization aborts receive a
+  bounded whole-transaction retry; other uniqueness failures remain hard errors, while direct
+  exact-dedupe conflicts surface as a typed error.
+- The soak oracle now requires one create, nineteen updates, one record per response, one
+  returned id, one active id, and an independent exact-text search returning that same durable
+  id. It no longer accepts a run merely because only one of several returned ids remains active.
+- A frozen local Kimi pass over commit `9f2024f` produced substantive analysis but timed out
+  before returning its required final verdict; it is recorded as `TIMED_OUT_NO_FINAL_VERDICT`,
+  never as a clearance. Independent verification of its partial findings gave `MODIFY` and led
+  to a follow-up patch: readiness now validates table ownership, key shape, hash expression,
+  predicate, uniqueness, readiness, and validity; migration work has a 30-second lock timeout
+  but no request statement timeout; malformed/missing decay kinds fail migration atomically;
+  and `hideExpiredOnRead=false` keeps its former reinforcement semantics.
+- Added adversarial coverage for same-named indexes on the wrong table/wrong definition, a
+  one-millisecond request timeout around a deliberately slow migration, malformed legacy decay
+  rollback, and a two-pool 20-writer race replacing one pre-existing expired memory exactly
+  once. Updated the Postgres self-hosting documentation to require migration 003 and distinguish
+  the ledger-idempotent runner from non-replayable raw SQL transitions.
+
+Validation after the repair: the fresh-schema Postgres suite reports 42 tests, 35 passed and
+seven pgvector-only skips, including seeded legacy-duplicate and invalid-decay migration proofs,
+structural readiness sabotage checks, and deterministic two-pool/20-writer regressions for both
+an empty key and a pre-existing expired row. The ordinary race returns one id and exact
+`created=1`/`updated=19` accounting. The 181-outcome application suite remains
+180 passed, one opt-in ONNX skip, zero failed; typechecks, build, harness syntax, and diff checks
+pass. The repaired bench canary is now complete; frozen-source Claude Opus review and the
+24-hour primary qualification remain mandatory before any production-ready claim.
+
+## Run: 2026-08-31 15:08 (IST)
+
+### Scope
+
+Document the exact framework compatibility evidence, same-harness comparisons with other
+memory systems, shared-instance multi-agent semantics, the completed short canary, and a
+rigorous path from autonomous L3 tool use to causal O1/O2 agent-outcome evidence.
+
+### Changes
+
+- Added an exact pinned-version framework matrix. Generic MCP, LangChain, LangGraph, both
+  OpenAI Agents routes, AutoGen and CrewAI are L2; Hermes/OpenClaw are L1; Claude Code/Codex
+  are L0. No route is described as autonomous L3 or task-uplift evidence.
+- Added a concise same-harness Memory Core versus supermemory/mem0 table. It reports the
+  early-precision losses alongside the retrieval-depth wins and lists unmeasured systems as
+  unmeasured instead of borrowing vendor numbers.
+- Documented one-instance multi-agent use: distinct credentials and producer apps, explicit
+  tenant/space/actor identities, actor/workspace/app/thread sharing patterns, and the boundary
+  between shared evidence and task coordination.
+- Added `docs/AGENT_EVALUATION.md`: stateless, token-matched transcript, Postgres+BM25,
+  Postgres+hybrid, competitor, oracle, read-disabled-placebo and irrelevant-memory arms;
+  retrieval-controlled versus end-to-end tracks; sealed paired tasks; L3/O1/O2 evidence;
+  a memory-on/off × shared/isolated multi-agent factorial; separate 24-hour quality and
+  reliability verdicts; seven-day drift; metrics, statistical treatment and provisional
+  release gates.
+- Corrected `buildContext` wording from “unmeasured” to its actual state: an internal
+  regression exists, but no public end-to-end agent-outcome score exists.
+- Recorded the live `CANARY_PASSED` evidence from commit `38a2806`, while stating that its
+  terminal bundle remains on the bench host and is not proof contained in this checkout.
+- Local Kimi Code 0.32.0 / `kimi-code/k3` completed a frozen, sanitized architecture and
+  experiment review with verdict **MODIFY — evidence gap**. Its corrections shaped the
+  factorial, inferential unit, task/lease boundary, evidence levels and longitudinal windows.
+
+### How It Works Now
+
+1. Each agent connects through its native adapter or a local stdio MCP proxy to one
+   authenticated Memory Core service.
+2. Principal configuration fixes tenant, space, app and actor outside model arguments.
+   Scopes decide intentional sharing; app/thread memory remains narrow while actor/workspace
+   memory can cross agents.
+3. Framework support claims stop at the highest observed L0/L1/L2 level for the exact pinned
+   version. A real model trace is required for L3.
+4. O1 pairs the same sealed single-agent scenario across memory controls and scores objective
+   environment outcomes. O2 estimates the shared-memory interaction in multi-agent tasks and
+   requires the effect to survive faults, growth and corrections.
+5. Memory remains evidence. Claims, leases, work ownership and consensus require separate
+   fenced coordination state.
+
+### Files Touched
+
+- `README.md` — public framework/multi-agent status and evaluation links.
+- `docs/INTEGRATION_GUIDE.md` — exact support matrix and shared-instance patterns.
+- `src/integrations/README.md` — route-specific verified/unverified claims.
+- `docs/BENCHMARKS.md` — comparison summary and corrected context-evaluation limits.
+- `docs/AGENT_EVALUATION.md` — causal and longitudinal experiment design.
+- `docs/ARCHITECTURE.md` — Kimi evidence gap and architecture priorities.
+- `bench/framework-compat/README.md` — completed canary summary and claim boundary.
+- `docs/CODEX_RUN_SUMMARY.md` — this handoff entry and the repaired-canary status correction.
+
+### Validation
+
+- Application suite: 181 outcomes, 180 passed, one opt-in ONNX case skipped, zero failed.
+- Application typecheck, benchmark typecheck and production build pass on Node 22.14.0.
+- The deterministic `buildContext` baseline passes and reproduces evidence recall 0.7692,
+  all-gold 0.7273, stale-over-current 0.375, abstention leakage 1.0 and zero budget violations.
+- All newly quoted supermemory/mem0 retrieval and matched-denominator QA values were checked
+  against the committed result artifacts.
+- Relative links across the eight affected documentation files, `git diff --check`, and the
+  branch-name policy pass.
+- Kimi exited 0. Raw review SHA-256:
+  `424a55ecfbf77c81edcbb447a688995c42a8391618e4643bc736f3156a0e8c22`;
+  independent validation:
+  `3f0cad92afbc803ee125632b7d184e868a6c9c6977737705a9c586ef0e91b045`;
+  receipt: `f91113a68f9b578b728ada6c880270d8e31716b77bf48dbf7b0d34b3553f59fa`.
+
+### Risks / Follow-ups
+
+- No autonomous L3, causal O1 or multi-agent O2 run has passed; the new gates are a protocol,
+  not a result.
+- The production-shaped Postgres provider, built-in extractor and hosted reranker still lack
+  a matched labeled quality run.
+- Direct competitor evidence is limited to supermemory on the internal synthetic suite and
+  mem0 OSS 2.0.14 on LoCoMo through our harness.
+- The 24-hour primary, backup/restore, rolling deployment, multi-replica behavior and
+  seven-day quality/drift study remain open.
+- Automatic semantic contradiction resolution and transactional remote revision remain open;
+  shared memory must not be used as a queue, lock or task lease.

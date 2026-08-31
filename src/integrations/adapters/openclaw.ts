@@ -78,7 +78,9 @@ export function openClawMcpConfig(options: OpenClawMcpOptions): OpenClawMcpConfi
           command: options.command ?? "npx",
           args: options.args ?? ["tsx", "src/integrations/mcp-server.ts"],
           env,
-          supportsParallelToolCalls: true,
+          // The tool surface includes revision operations. Keep host-level
+          // parallel calls disabled until supersede is transactional.
+          supportsParallelToolCalls: false,
           toolFilter: { include: MEMORY_TOOLS.map((tool) => tool.name) },
         },
       },

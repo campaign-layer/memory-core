@@ -7,6 +7,38 @@ straight to [`src/integrations/README.md`](../src/integrations/README.md) — it
 tools, both backends, and an explicit verified/not-verified list. This file covers the
 HTTP/SDK path.
 
+## Verified framework matrix
+
+Evidence is graded so configuration acceptance is not presented as successful tool use:
+
+| Framework/host | Exact tested version | Route | Evidence | What passed |
+|---|---:|---|---|---|
+| Generic MCP TypeScript SDK | 1.30.0 | stdio MCP → remote service | L2 | Discovery plus malformed-input rejection and the complete six-tool lifecycle. |
+| LangChain MCP adapters | 1.1.4 | stdio MCP → remote service | L2 | Real adapter discovery and lifecycle execution. |
+| LangGraph | 1.4.13 | graph node using the LangChain MCP adapter | L2 | Real graph invocation and lifecycle execution. |
+| OpenAI Agents SDK | 0.17.0 | MCP client | L2 | Real SDK MCP client lifecycle. |
+| OpenAI Agents SDK | 0.17.0 | native Memory Core descriptors and `Runner` | L2 | Real runner with a credential-free `ScriptedModel`; this is deterministic, not autonomous model selection. |
+| AutoGen | 0.7.5 | MCP 1.28.1 | L2 | Discovery and complete lifecycle execution. |
+| CrewAI / CrewAI Tools | 1.15.18 | MCP 1.28.1 | L2 | Discovery and complete lifecycle execution, including its optional-argument `null` behavior. |
+| Hermes Agent | 0.19.0 | real Hermes MCP host | L1 | Host connection and six-tool discovery only. |
+| OpenClaw | 2026.7.1-2 | real OpenClaw MCP host | L1 | Host connection and six-tool discovery only. |
+| Claude Code | 2.1.251 | isolated CLI configuration | L0 | Configuration acceptance/readback only. |
+| Codex CLI | 0.151.0 | isolated CLI configuration | L0 | Configuration acceptance/readback only. |
+
+L0 means configuration only, L1 real host discovery, L2 deterministic real-host execution,
+and L3 autonomous model selection with a retained tool trace. **No framework has L3 or
+measured task-uplift evidence yet.** The exact harness and evidence definitions are in
+[`bench/framework-compat/README.md`](../bench/framework-compat/README.md); the missing L3 and
+outcome experiments are specified in [`AGENT_EVALUATION.md`](./AGENT_EVALUATION.md).
+
+The latest live frozen-source canary for this matrix, commit `38a2806`, completed 900
+seconds, 3,552 requests, four application/database restart or SIGKILL faults, and five
+persistence audits covering 1,032 record checks. It reported `CANARY_PASSED`, zero isolation
+violations, zero acknowledged-write loss and zero concurrency failures. Its terminal evidence
+is retained on the bench host, not committed in this checkout; the repository contains the
+reproducible harness. A canary is not the 24-hour production qualification and it used lexical
+retrieval with extraction disabled.
+
 ## Connect local agents to the shared service
 
 For Claude, Codex, and Hermes to share one memory space, run a single HTTP service and let
@@ -23,6 +55,30 @@ from trusted process configuration; those fields are not exposed as model argume
 three principals should share tenant/space/actor for actor memory, while using distinct app
 ids for provenance. Start the service first using the secure local recipe in
 [`deployment.md`](./deployment.md#local-self-hosting).
+
+### One service, several agents
+
+Yes: one Postgres-backed Memory Core instance is designed to serve many agents and agent
+frameworks. The service is the shared memory authority; each agent gets a distinct
+principal-bound key and `appId`, so reads can cross applications without sharing credentials
+or losing producer provenance.
+
+Choose the identity and scope deliberately:
+
+| Collaboration pattern | Identity configuration | Scope to write | Result |
+|---|---|---|---|
+| Claude, Codex and Hermes assisting one person | Same tenant, space and actor; distinct app ids | `actor` | The person’s memory follows them across agents. |
+| Planner, implementer and reviewer for one team | Same tenant and space; distinct actors/apps | `workspace` | Team decisions cross roles; actor-private memory does not. |
+| An agent’s private scratch state | Same shared service, distinct app id | `app` | Other applications cannot read it. |
+| One conversation or delegated subtask | Same actor plus an access thread | `thread` | Only that actor in that thread can read it. |
+| Organization-wide policy | Same tenant, tightly controlled writer | `tenant` | Visible across spaces in that tenant. |
+
+This is shared memory, not a message queue or distributed lock. Exact concurrent duplicates
+are atomically collapsed in PostgreSQL and feedback increments are atomic. Semantically
+conflicting paraphrases are not automatically resolved, and remote `supersede` is still a
+create-then-retire workflow. Multi-agent planners must therefore keep task ownership and
+workflow state in a coordinator, and use Memory Core for durable evidence, decisions,
+preferences and outcomes.
 
 The memory-core HTTP service is REST, **not** an HTTP MCP endpoint. Claude, Codex, and Hermes
 must launch `dist/integrations/mcp-server.js` over stdio; setting an MCP client's `url` to
@@ -289,15 +345,18 @@ const service = new MemoryCoreService(new InMemoryProvider());
 
 ## Framework mapping
 
-| Framework | Approach |
-|---|---|
-| Claude Code, Claude Desktop, any MCP host | The MCP server, embedded or remote. See [`src/integrations/README.md`](../src/integrations/README.md). |
-| Anthropic / OpenAI tool use | `toAnthropicTools()` / `toOpenAITools()` + `dispatch()`, or the `runAnthropicTurn` / `runOpenAITurn` helpers. |
-| OpenAI Agents SDK | `toOpenAIAgentsTools(ctx)`. Field names are from vendor docs and unverified here. |
-| OpenClaw | MCP is the recommended path. Config key is **`mcp.servers`**, not `mcpServers`, and OpenClaw ships its own bundled plugin also named `memory-core` — register under a distinct id to avoid the collision. |
-| Hermes Agent | MCP via `~/.hermes/config.yaml` (`mcp_servers`, snake_case), or the Python plugin in `src/integrations/adapters/hermes-plugin/`. |
-| LangChain / LangGraph | Call memory-core in graph nodes, pre- and post-model. `langchain` is not a dependency; `toOpenAITools()` + `dispatch()` covers a `StructuredTool` wrapper in a few lines. |
-| Custom orchestrators | `MemoryCoreClient`, or `createMemoryToolkit(ctx)` for a runtime-agnostic tool list. |
+| Framework | Recommended approach | Current evidence |
+|---|---|---|
+| Claude Code / Claude Desktop | Remote stdio MCP proxy for a shared service; embedded file mode only for one process. | Claude Code L0; generic MCP lifecycle L2. Claude-specific autonomous use is untested. |
+| Codex CLI / app | Remote stdio MCP proxy. | Codex CLI L0; generic MCP lifecycle L2. Codex-specific autonomous use is untested. |
+| Anthropic / OpenAI tool use | `toAnthropicTools()` / `toOpenAITools()` + `dispatch()`, or the `runAnthropicTurn` / `runOpenAITurn` helpers. | Contract/unit tested; no current live-model outcome run. |
+| OpenAI Agents SDK | MCP client or `toOpenAIAgentsTools(ctx)`. | Both routes L2 against 0.17.0; native runner uses a deterministic scripted model. |
+| AutoGen | Remote stdio MCP proxy. | L2 against 0.7.5. |
+| CrewAI | Remote stdio MCP proxy. | L2 against CrewAI / CrewAI Tools 1.15.18. |
+| LangChain / LangGraph | Remote MCP adapter in a node, pre- and post-model. | L2 against adapters 1.1.4 and LangGraph 1.4.13. |
+| OpenClaw | Remote MCP under a distinct id; config key is **`mcp.servers`**. | L1 against 2026.7.1-2. Native memory-slot integration is not implemented. |
+| Hermes Agent | Remote MCP via `mcp_servers` in `~/.hermes/config.yaml`. | L1 against 0.19.0. The Python tool plugin is contract-tested but not a real-host pass. |
+| Custom orchestrators | `MemoryCoreClient`, or `createMemoryToolkit(ctx)` for a runtime-agnostic tool list. | Core SDK/tool contracts and generic MCP are tested; the host remains responsible for L3 behavior. |
 
 ## Splitting responsibilities
 

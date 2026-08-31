@@ -38,6 +38,10 @@ RUN if [ "$MEMORY_CORE_INCLUDE_LOCAL_ONNX" = "true" ]; then \
 
 # --- stage 3: runtime ---------------------------------------------------------
 FROM node:22-bookworm-slim AS runtime
+# Normal images remain buildable without provenance arguments. The qualification
+# Compose file supplies exact object IDs, and its controller rejects `unknown`.
+ARG MEMORY_CORE_BUILD_REVISION=unknown
+ARG MEMORY_CORE_BUILD_SOURCE_TREE=unknown
 ENV NODE_ENV=production
 WORKDIR /app
 
@@ -50,7 +54,18 @@ COPY migrations ./migrations
 
 # The file provider writes to MEMORY_FILE_PATH, default ./data/memory-core.json,
 # and the image runs unprivileged. Mount a volume here to persist across runs.
-RUN mkdir -p /app/data && chown -R node:node /app/data
+RUN mkdir -p /app/data \
+    && chown -R node:node /app/data \
+    && if [ "$MEMORY_CORE_BUILD_REVISION" != "unknown" ]; then \
+         test "${#MEMORY_CORE_BUILD_REVISION}" -eq 40 \
+         && test -z "$(printf '%s' "$MEMORY_CORE_BUILD_REVISION" | tr -d '0-9a-f')"; \
+       fi \
+    && if [ "$MEMORY_CORE_BUILD_SOURCE_TREE" != "unknown" ]; then \
+         test "${#MEMORY_CORE_BUILD_SOURCE_TREE}" -eq 40 \
+         && test -z "$(printf '%s' "$MEMORY_CORE_BUILD_SOURCE_TREE" | tr -d '0-9a-f')"; \
+       fi
+LABEL org.opencontainers.image.revision="${MEMORY_CORE_BUILD_REVISION}" \
+      io.memory-core.source-tree="${MEMORY_CORE_BUILD_SOURCE_TREE}"
 USER node
 
 EXPOSE 7401

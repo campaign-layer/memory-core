@@ -4,6 +4,8 @@ import { InMemoryProvider } from "../providers/in-memory-provider.js";
 import { MemoryCoreService } from "../service.js";
 import { runAnthropicTurn } from "./adapters/anthropic.js";
 import { createMemoryToolkit } from "./adapters/generic.js";
+import { hermesMcpConfig } from "./adapters/hermes.js";
+import { openClawMcpConfig } from "./adapters/openclaw.js";
 import { runOpenAITurn } from "./adapters/openai-agents.js";
 import {
   MEMORY_TOOLS,
@@ -46,6 +48,14 @@ test("tool surface stays small and stable", () => {
   assert.equal(getMemoryTool("nope"), undefined);
 });
 
+test("host configs do not advertise parallel revision calls", () => {
+  const identity = { tenantId: "acme", spaceId: "shared", appId: "agent", actorId: "alice" };
+  const hermes = hermesMcpConfig({ identity });
+  assert.equal(hermes.mcp_servers.memory_core!.supports_parallel_tool_calls, false);
+  const openclaw = openClawMcpConfig({ identity });
+  assert.equal(openclaw.mcp.servers["maitrix-memory-core"]!.supportsParallelToolCalls, false);
+});
+
 test("schemas reject bad input", () => {
   const remember = getMemoryTool("remember")!.schema;
   assert.equal(remember.safeParse({ text: "no" }).success, false, "text under 4 chars");
@@ -56,6 +66,12 @@ test("schemas reject bad input", () => {
   const recall = getMemoryTool("recall")!.schema;
   assert.equal(recall.safeParse({ query: "hi", limit: 99 }).success, false);
   assert.equal(recall.safeParse({ query: "hi", types: [] }).success, false);
+  assert.equal(recall.safeParse({ query: "hi", types: null }).success, true);
+
+  const forget = getMemoryTool("forget")!.schema;
+  assert.equal(forget.safeParse({ memoryId: "m1", reason: null }).success, true);
+  const supersede = getMemoryTool("supersede")!.schema;
+  assert.equal(supersede.safeParse({ memoryId: "m1", newText: "updated fact", reason: null }).success, true);
 
   const feedback = getMemoryTool("feedback")!.schema;
   assert.equal(feedback.safeParse({ memoryId: "m1", signal: "positive" }).success, false);
@@ -437,7 +453,7 @@ test("openai export is structurally valid", () => {
   assert.deepEqual(recall.function.parameters.required, ["query"]);
   assert.deepEqual(recall.function.parameters.properties!.types, {
     description: recall.function.parameters.properties!.types!.description,
-    type: "array",
+    type: ["array", "null"],
     items: { type: "string", enum: ["fact", "preference", "goal", "project", "episode", "instruction", "tool_outcome"] },
     minItems: 1,
     maxItems: 7,

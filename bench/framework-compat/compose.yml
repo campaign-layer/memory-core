@@ -1,0 +1,87 @@
+services:
+  db:
+    # The launcher records the pulled immutable image ID in the run manifest.
+    image: ${POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    environment:
+      POSTGRES_USER: memory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in the run env file}
+      POSTGRES_DB: memory_core
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory -d memory_core"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    cpus: 2.0
+    mem_limit: 4g
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "5"
+
+  migrate:
+    image: memory-core-framework-bench:${MC_GIT_SHA:?set in the run env file}
+    build:
+      context: ../..
+      args:
+        MEMORY_CORE_BUILD_REVISION: ${MC_GIT_SHA:?set in the run env file}
+        MEMORY_CORE_BUILD_SOURCE_TREE: ${MC_GIT_TREE:?set in the run env file}
+    command: ["node", "dist/migrate.js"]
+    environment: &database-environment
+      MEMORY_PG_URL: ${MEMORY_PG_URL:?set in the run env file}
+      MEMORY_EMBEDDER: none
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - database
+    restart: "no"
+    cpus: 1.0
+    mem_limit: 1g
+    pids_limit: 128
+
+  memory-core:
+    image: memory-core-framework-bench:${MC_GIT_SHA:?set in the run env file}
+    environment:
+      <<: *database-environment
+      MEMORY_ENV: production
+      MEMORY_PROVIDER: postgres
+      MEMORY_PG_AUTO_MIGRATE: "false"
+      MEMORY_CORE_PRINCIPAL_API_KEYS: ${MEMORY_CORE_PRINCIPAL_API_KEYS:?set in the run env file}
+      MEMORY_RATE_LIMIT_PER_MIN: ${MEMORY_RATE_LIMIT_PER_MIN:-10000}
+      MEMORY_EXTRACTOR: none
+      HOST: 0.0.0.0
+      PORT: 7401
+    ports:
+      - "127.0.0.1:${MC_PORT:-17401}:7401"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - database
+      - client
+    restart: unless-stopped
+    cpus: 2.0
+    mem_limit: 2g
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "5"
+
+volumes:
+  postgres-data:
+
+networks:
+  database:
+    internal: true
+  client:

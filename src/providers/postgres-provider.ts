@@ -4,7 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import type { Pool as PgPool, PoolClient } from "pg";
-import type { MemoryIdScope, MemoryProvider, ProviderHealthStatus } from "../provider.js";
+import type {
+  AtomicMemoryIngestResult,
+  MemoryIdScope,
+  MemoryProvider,
+  ProviderHealthStatus,
+} from "../provider.js";
 import type {
   DecayPolicy,
   MemoryCompactResult,
@@ -108,6 +113,34 @@ const RECENCY_HALF_LIFE_DAYS = 30;
 const LN2 = 0.6931471805599453;
 const MAX_CANDIDATES = 1_000;
 
+const ACTIVE_DEDUPE_INDEXES = {
+  tenant: "memories_active_tenant_dedupe_uidx",
+  workspace: "memories_active_workspace_dedupe_uidx",
+  app: "memories_active_app_dedupe_uidx",
+  actor: "memories_active_actor_dedupe_uidx",
+  thread: "memories_active_thread_dedupe_uidx",
+} as const satisfies Record<MemoryScope, string>;
+
+const ACTIVE_DEDUPE_INDEX_NAMES = new Set<string>(Object.values(ACTIVE_DEDUPE_INDEXES));
+
+const ACTIVE_DEDUPE_INDEX_KEY_SIGNATURES = {
+  tenant: "tenant_id,memory_type,<expression>",
+  workspace: "tenant_id,space_id,memory_type,<expression>",
+  app: "tenant_id,space_id,app_id,memory_type,<expression>",
+  actor: "tenant_id,space_id,actor_id,memory_type,<expression>",
+  thread: "tenant_id,space_id,actor_id,<expression>,memory_type,<expression>",
+} as const satisfies Record<MemoryScope, string>;
+
+/** Raised only when a direct provider write loses the active exact-dedupe
+ * invariant. MemoryCoreService uses ingestOrReinforceExact(), so normal service
+ * callers receive the winning record rather than this error. */
+export class MemoryDedupeConflictError extends Error {
+  constructor(readonly indexName: string) {
+    super("postgres-provider: an active exact duplicate already exists");
+    this.name = "MemoryDedupeConflictError";
+  }
+}
+
 interface MemoryRow {
   id: string;
   tenant_id: string;
@@ -169,6 +202,14 @@ function columnList(alias?: string): string {
 function assertScope(tenantId: string | undefined, appId: string | undefined, where: string): void {
   if (!tenantId || !appId) {
     throw new Error(`postgres-provider: ${where} requires both tenantId and appId (refusing an unscoped query)`);
+  }
+}
+
+function assertWritableRecord(record: MemoryRecord, where: string): void {
+  assertScope(record.tenantId, record.appId, where);
+  if (!record.id) throw new Error(`postgres-provider: ${where} requires a record id`);
+  if (record.scope === "thread" && !record.threadId?.trim()) {
+    throw new Error(`postgres-provider: ${where} requires threadId for thread-scoped memory`);
   }
 }
 
@@ -294,9 +335,9 @@ function decayAnchorSql(alias: string): string {
 }
 
 function expiredSql(alias: string): string {
-  return `((${alias}.decay_policy ->> 'kind') IN ('time', 'inactivity')
+  return `COALESCE(((${alias}.decay_policy ->> 'kind') IN ('time', 'inactivity')
            AND ${ttlDaysSql(alias)} > 0
-           AND ${decayAnchorSql(alias)} < now() - ${ttlDaysSql(alias)} * interval '1 day')`;
+           AND ${decayAnchorSql(alias)} < now() - ${ttlDaysSql(alias)} * interval '1 day'), FALSE)`;
 }
 
 function statNumberSql(alias: string, key: string): string {
@@ -362,6 +403,47 @@ function feedbackSql(alias: string): string {
 function isMissingRelation(error: unknown): boolean {
   const code = (error as { code?: string } | null)?.code;
   return code === "42P01" || code === "42883";
+}
+
+function dedupeConstraintName(error: unknown): string | null {
+  const pgError = error as { code?: string; constraint?: string } | null;
+  return pgError?.code === "23505" && pgError.constraint && ACTIVE_DEDUPE_INDEX_NAMES.has(pgError.constraint)
+    ? pgError.constraint
+    : null;
+}
+
+function isRetryableTransactionError(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  return code === "40P01" || code === "40001";
+}
+
+function normalizedDedupeTextSql(textExpression: string): string {
+  return `lower(regexp_replace(btrim(${textExpression}), '\\s+', ' ', 'g'))`;
+}
+
+function dedupeHashSql(textExpression: string): string {
+  return `memory_core_text_sha256(${normalizedDedupeTextSql(textExpression)})`;
+}
+
+function exactConflictTarget(scope: MemoryScope): string {
+  const hashExpression = `(${dedupeHashSql("text")})`;
+  switch (scope) {
+    case "tenant":
+      return `(tenant_id, memory_type, ${hashExpression})
+              WHERE status = 'active' AND scope = 'tenant'`;
+    case "workspace":
+      return `(tenant_id, space_id, memory_type, ${hashExpression})
+              WHERE status = 'active' AND scope = 'workspace'`;
+    case "app":
+      return `(tenant_id, space_id, app_id, memory_type, ${hashExpression})
+              WHERE status = 'active' AND scope = 'app'`;
+    case "actor":
+      return `(tenant_id, space_id, actor_id, memory_type, ${hashExpression})
+              WHERE status = 'active' AND scope = 'actor'`;
+    case "thread":
+      return `(tenant_id, space_id, actor_id, (coalesce(thread_id, '')), memory_type, ${hashExpression})
+              WHERE status = 'active' AND scope = 'thread'`;
+  }
 }
 
 export class PostgresMemoryProvider implements MemoryProvider {
@@ -433,6 +515,7 @@ export class PostgresMemoryProvider implements MemoryProvider {
       : [
           fileURLToPath(new URL("../../migrations/001_init.sql", import.meta.url)),
           fileURLToPath(new URL("../../migrations/002_memory_spaces.sql", import.meta.url)),
+          fileURLToPath(new URL("../../migrations/003_concurrent_dedupe.sql", import.meta.url)),
         ];
   }
 
@@ -444,6 +527,12 @@ export class PostgresMemoryProvider implements MemoryProvider {
       this.migratePromise = (async () => {
         const client = await this.pool.connect();
         try {
+          // Normal request deadlines must not abort a deliberately blocking
+          // schema job halfway through a large-table index build. Bound lock
+          // acquisition instead, then allow the migration work itself to
+          // finish. RESET in finally keeps pooled request connections bounded.
+          await client.query("SET statement_timeout = 0");
+          await client.query("SET lock_timeout = '30s'");
           await client.query("SELECT pg_advisory_lock(hashtext('memory-core:schema-migrations'))");
           await client.query(
             `CREATE TABLE IF NOT EXISTS memory_core_migrations (
@@ -515,6 +604,8 @@ export class PostgresMemoryProvider implements MemoryProvider {
           throw error;
         } finally {
           await client.query("SELECT pg_advisory_unlock(hashtext('memory-core:schema-migrations'))").catch(() => {});
+          await client.query("RESET lock_timeout").catch(() => {});
+          await client.query("RESET statement_timeout").catch(() => {});
           client.release();
         }
       })().catch((error) => {
@@ -548,6 +639,21 @@ export class PostgresMemoryProvider implements MemoryProvider {
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  /** Deadlocks and serialization failures abort the whole transaction without
+   * committing effects, so a small bounded retry is safe for write primitives.
+   * This also protects direct multi-key batches whose expired-row lock sets can
+   * overlap even though ordinary service ingests contain one candidate. */
+  private async withWriteTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.withTransaction(fn);
+      } catch (error) {
+        if (!isRetryableTransactionError(error) || attempt >= 3) throw error;
+        await new Promise((resolve) => setTimeout(resolve, attempt * 10));
+      }
     }
   }
 
@@ -685,35 +791,197 @@ export class PostgresMemoryProvider implements MemoryProvider {
 
   // -- writes ---------------------------------------------------------------
 
+  /**
+   * Retire logically expired rows before an insert reaches the status='active'
+   * uniqueness boundary. Everything happens in the caller transaction, so a
+   * later insert failure rolls the archival back too. Multi-key deadlocks remain
+   * possible under arbitrary query plans and are retried by withWriteTransaction.
+   */
+  private async archiveExpiredExactDuplicates(
+    client: PoolClient,
+    records: MemoryRecord[],
+  ): Promise<void> {
+    const active = records.filter((record) => record.status === "active");
+    if (active.length === 0) return;
+
+    const params = new Params();
+    const rows = active.map((record) => {
+      const cells = [
+        params.add(record.id),
+        params.add(record.tenantId),
+        params.add(record.spaceId),
+        params.add(record.appId),
+        params.add(record.actorId),
+        params.add(record.threadId ?? null),
+        params.add(record.scope),
+        params.add(record.memoryType),
+        params.add(record.text),
+      ];
+      return `(${cells.join(", ")})`;
+    });
+
+    const incomingMatch = [
+      "m.tenant_id = i.tenant_id",
+      "m.scope = i.scope",
+      "m.memory_type = i.memory_type",
+      `${dedupeHashSql("m.text")} = ${dedupeHashSql("i.text")}`,
+      `${normalizedDedupeTextSql("m.text")} = ${normalizedDedupeTextSql("i.text")}`,
+      `(i.scope = 'tenant'
+        OR (i.scope = 'workspace' AND m.space_id = i.space_id)
+        OR (i.scope = 'app' AND m.space_id = i.space_id AND m.app_id = i.app_id)
+        OR (i.scope = 'actor' AND m.space_id = i.space_id AND m.actor_id = i.actor_id)
+        OR (i.scope = 'thread' AND m.space_id = i.space_id AND m.actor_id = i.actor_id
+            AND m.thread_id IS NOT DISTINCT FROM i.thread_id))`,
+    ].join("\n                 AND ");
+
+    await client.query(
+      `WITH incoming (id, tenant_id, space_id, app_id, actor_id, thread_id, scope, memory_type, text) AS (
+         VALUES ${rows.join(", ")}
+       ), targets AS (
+         SELECT m.id
+           FROM memories m
+          WHERE m.status = 'active'
+            AND ${expiredSql("m")}
+            AND NOT EXISTS (SELECT 1 FROM incoming own WHERE own.id = m.id)
+            AND EXISTS (
+              SELECT 1 FROM incoming i
+               WHERE ${incomingMatch}
+            )
+          ORDER BY m.id
+          FOR UPDATE OF m
+       )
+       UPDATE memories m
+          SET status = 'archived',
+              updated_at = now(),
+              metadata = (CASE WHEN jsonb_typeof(m.metadata) = 'object'
+                               THEN m.metadata ELSE '{}'::jsonb END)
+                         || jsonb_build_object(
+                              'archivedAt', now(),
+                              'archiveReason', 'expired-before-exact-dedupe-replacement'
+                            )
+         FROM targets
+        WHERE m.id = targets.id`,
+      params.values,
+    );
+  }
+
+  /**
+   * PostgreSQL-native exact ingest. The partial unique index is the arbiter, so
+   * concurrent calls from different processes either create the candidate or
+   * atomically reinforce and return the already-committed winner.
+   */
+  async ingestOrReinforceExact(candidate: MemoryRecord): Promise<AtomicMemoryIngestResult> {
+    await this.ready();
+    candidate = normalizeRecordSpace(candidate);
+    assertWritableRecord(candidate, "ingestOrReinforceExact");
+    if (candidate.status !== "active") {
+      throw new Error("postgres-provider: ingestOrReinforceExact requires an active candidate");
+    }
+
+    const prepared = await this.prepareEmbeddings([candidate]);
+
+    try {
+      return await this.withWriteTransaction(async (client) => {
+        if (this.hideExpiredOnRead) {
+          await this.archiveExpiredExactDuplicates(client, [candidate]);
+        }
+
+        const params = new Params();
+        const cells = [
+          params.add(candidate.id),
+          params.add(candidate.tenantId),
+          params.add(candidate.spaceId),
+          params.add(candidate.appId),
+          params.add(candidate.actorId),
+          params.add(candidate.threadId ?? null),
+          params.add(candidate.scope),
+          params.add(candidate.memoryType),
+          params.add(candidate.text),
+          params.add(candidate.summary ?? null),
+          `${params.add(JSON.stringify(candidate.metadata ?? {}))}::jsonb`,
+          `${params.add(candidate.confidence)}::real`,
+          `${params.add(candidate.importance)}::real`,
+          params.add(candidate.status),
+          `${params.add(JSON.stringify(candidate.source ?? {}))}::jsonb`,
+          `${params.add(JSON.stringify(candidate.decayPolicy ?? { kind: "none" }))}::jsonb`,
+          `${params.add(candidate.firstSeenAt)}::timestamptz`,
+          `${params.add(candidate.lastSeenAt)}::timestamptz`,
+          `${params.add(candidate.createdAt)}::timestamptz`,
+          `${params.add(candidate.updatedAt)}::timestamptz`,
+          `${params.add(JSON.stringify(candidate.stats ?? {}))}::jsonb`,
+        ];
+
+        const result = await client.query<MemoryRow>(
+          `INSERT INTO memories (${columnList()})
+           VALUES (${cells.join(", ")})
+           ON CONFLICT ${exactConflictTarget(candidate.scope)} DO UPDATE SET
+             last_seen_at = GREATEST(memories.last_seen_at, EXCLUDED.last_seen_at),
+             updated_at = GREATEST(memories.updated_at, EXCLUDED.updated_at),
+             confidence = GREATEST(memories.confidence, EXCLUDED.confidence),
+             importance = GREATEST(memories.importance, EXCLUDED.importance),
+             summary = coalesce(memories.summary, EXCLUDED.summary),
+             metadata = (CASE WHEN jsonb_typeof(memories.metadata) = 'object'
+                              THEN memories.metadata ELSE '{}'::jsonb END)
+                        || (CASE WHEN jsonb_typeof(EXCLUDED.metadata) = 'object'
+                                 THEN EXCLUDED.metadata ELSE '{}'::jsonb END)
+           WHERE ${normalizedDedupeTextSql("memories.text")} = ${normalizedDedupeTextSql("EXCLUDED.text")}
+           RETURNING ${columnList()}`,
+          params.values,
+        );
+
+        const row = result.rows[0];
+        if (!row) {
+          throw new Error(
+            "postgres-provider: exact-dedupe hash collision or index mismatch; refusing to merge distinct text",
+          );
+        }
+        const record = mapRow(row);
+        const created = record.id === candidate.id;
+        if (created && prepared) await this.writeEmbeddings(client, [record], prepared);
+        return { created, record };
+      });
+    } catch (error) {
+      const indexName = dedupeConstraintName(error);
+      if (indexName) throw new MemoryDedupeConflictError(indexName);
+      throw error;
+    }
+  }
+
   async ingest(records: MemoryRecord[]): Promise<MemoryRecord[]> {
     if (records.length === 0) return [];
     await this.ready();
 
     records = records.map(normalizeRecordSpace);
 
-    for (const record of records) {
-      assertScope(record.tenantId, record.appId, "ingest");
-      if (!record.id) throw new Error("postgres-provider: ingest requires a record id");
-    }
+    for (const record of records) assertWritableRecord(record, "ingest");
 
     const prepared = await this.prepareEmbeddings(records);
     const ordered = orderForLocking(records);
 
-    return this.withTransaction(async (client) => {
-      const byId = new Map<string, MemoryRecord>();
-      // 21 binds per row; 500 rows stays well inside the 65535 bind limit.
-      for (let offset = 0; offset < ordered.length; offset += 500) {
-        for (const row of await this.upsertChunk(client, ordered.slice(offset, offset + 500))) {
-          byId.set(row.id, row);
+    try {
+      return await this.withWriteTransaction(async (client) => {
+        if (this.hideExpiredOnRead) {
+          await this.archiveExpiredExactDuplicates(client, ordered);
         }
-      }
-      if (prepared) {
-        const stored = ordered.map((record) => byId.get(record.id)).filter((row): row is MemoryRecord => Boolean(row));
-        await this.writeEmbeddings(client, stored, prepared);
-      }
-      // RETURNING order is not guaranteed, so re-emit in the caller's order.
-      return records.map((record) => byId.get(record.id)).filter((row): row is MemoryRecord => Boolean(row));
-    });
+        const byId = new Map<string, MemoryRecord>();
+        // 21 binds per row; 500 rows stays well inside the 65535 bind limit.
+        for (let offset = 0; offset < ordered.length; offset += 500) {
+          for (const row of await this.upsertChunk(client, ordered.slice(offset, offset + 500))) {
+            byId.set(row.id, row);
+          }
+        }
+        if (prepared) {
+          const stored = ordered.map((record) => byId.get(record.id)).filter((row): row is MemoryRecord => Boolean(row));
+          await this.writeEmbeddings(client, stored, prepared);
+        }
+        // RETURNING order is not guaranteed, so re-emit in the caller's order.
+        return records.map((record) => byId.get(record.id)).filter((row): row is MemoryRecord => Boolean(row));
+      });
+    } catch (error) {
+      const indexName = dedupeConstraintName(error);
+      if (indexName) throw new MemoryDedupeConflictError(indexName);
+      throw error;
+    }
   }
 
   private async upsertChunk(client: PoolClient, records: MemoryRecord[]): Promise<MemoryRecord[]> {
@@ -1093,8 +1361,9 @@ export class PostgresMemoryProvider implements MemoryProvider {
     assertScope(candidate.tenantId, candidate.appId, "findDuplicate");
     candidate = normalizeRecordSpace(candidate);
 
-    // Index probe on memories_dedup_idx: the normalized-text hash is a stored
-    // generated column, so this never degrades to a lower(text) scan.
+    // SHA-256 selects the scope-specific unique index. The normalized-text
+    // equality is a fail-closed collision guard and is evaluated only over the
+    // hash match.
     const result = await this.pool.query<MemoryRow>(
       `SELECT ${columnList("m")}
          FROM memories m
@@ -1102,7 +1371,8 @@ export class PostgresMemoryProvider implements MemoryProvider {
           AND m.scope = $2
           AND m.memory_type = $3
           AND m.status = 'active'
-          AND m.text_hash = md5(lower(regexp_replace(btrim($4::text), '\\s+', ' ', 'g')))
+          AND ${dedupeHashSql("m.text")} = ${dedupeHashSql("$4::text")}
+          AND ${normalizedDedupeTextSql("m.text")} = ${normalizedDedupeTextSql("$4::text")}
           AND (
             ($2 = 'tenant')
             OR ($2 = 'workspace' AND m.space_id = $5)
@@ -1259,6 +1529,7 @@ export class PostgresMemoryProvider implements MemoryProvider {
         vector_version: string | null;
         memory_table: string | null;
         memory_space_column: boolean;
+        memory_dedupe_indexes: boolean;
         estimated_rows: string | null;
         embedding_table: string | null;
         embedding_space_column: boolean;
@@ -1271,6 +1542,42 @@ export class PostgresMemoryProvider implements MemoryProvider {
                    WHERE attrelid = to_regclass('memories')
                      AND attname = 'space_id' AND attnotnull AND NOT attisdropped
                 ) AS memory_space_column,
+                (SELECT count(*) = 5
+                   FROM unnest($2::text[], $3::text[], $4::text[])
+                        AS expected(index_name, scope_name, key_signature)
+                   JOIN pg_class index_relation ON index_relation.relname = expected.index_name
+                   JOIN pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
+                   JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
+                   CROSS JOIN LATERAL (
+                     SELECT string_agg(
+                              CASE WHEN key_part.attnum = 0 THEN '<expression>' ELSE attribute.attname END,
+                              ',' ORDER BY key_part.ordinality
+                            ) AS signature
+                       FROM unnest(index_state.indkey::smallint[]) WITH ORDINALITY
+                            AS key_part(attnum, ordinality)
+                       LEFT JOIN pg_attribute attribute
+                         ON attribute.attrelid = index_state.indrelid
+                        AND attribute.attnum = key_part.attnum
+                   ) AS actual_keys
+                  WHERE index_namespace.nspname = current_schema()
+                    AND index_state.indrelid = to_regclass('memories')
+                    AND index_state.indisunique
+                    AND index_state.indisready
+                    AND index_state.indisvalid
+                    AND actual_keys.signature = expected.key_signature
+                    AND position('memory_core_text_sha256' IN pg_get_indexdef(index_relation.oid)) > 0
+                    AND position('status = ''active''' IN pg_get_expr(index_state.indpred, index_state.indrelid)) > 0
+                    AND position(
+                          format('scope = %L', expected.scope_name)
+                          IN pg_get_expr(index_state.indpred, index_state.indrelid)
+                        ) > 0
+                    AND (
+                      expected.scope_name <> 'thread'
+                      OR position(
+                           'coalesce(thread_id'
+                           IN lower(pg_get_indexdef(index_relation.oid))
+                         ) > 0
+                    )) AS memory_dedupe_indexes,
                 (SELECT reltuples::bigint::text FROM pg_class WHERE oid = to_regclass('memories')) AS estimated_rows,
                 to_regclass($1)::text AS embedding_table,
                 EXISTS (
@@ -1278,13 +1585,19 @@ export class PostgresMemoryProvider implements MemoryProvider {
                    WHERE attrelid = to_regclass($1)
                      AND attname = 'space_id' AND attnotnull AND NOT attisdropped
                 ) AS embedding_space_column`,
-        [this.embedder ? `memory_embeddings_${this.embedder.dims}` : "memory_embeddings_384"],
+        [
+          this.embedder ? `memory_embeddings_${this.embedder.dims}` : "memory_embeddings_384",
+          Object.values(ACTIVE_DEDUPE_INDEXES),
+          Object.keys(ACTIVE_DEDUPE_INDEXES),
+          Object.values(ACTIVE_DEDUPE_INDEX_KEY_SIGNATURES),
+        ],
       );
       const row = result.rows[0];
       const needsVector = Boolean(this.embedder);
       const hasVector = Boolean(row?.vector_version);
       const hasMemoryTable = Boolean(row?.memory_table);
       const hasCurrentMemorySchema = hasMemoryTable && Boolean(row?.memory_space_column);
+      const hasConcurrentDedupeSchema = hasCurrentMemorySchema && Boolean(row?.memory_dedupe_indexes);
       const hasEmbeddingTable = !needsVector || (
         Boolean(row?.embedding_table) && Boolean(row?.embedding_space_column)
       );
@@ -1296,13 +1609,16 @@ export class PostgresMemoryProvider implements MemoryProvider {
         `vector_search_failures=${this.vectorSearchFailures}`,
       ];
       if (hasMemoryTable && !hasCurrentMemorySchema) details.push("memory schema outdated: apply migration 002_memory_spaces");
+      if (hasCurrentMemorySchema && !hasConcurrentDedupeSchema) {
+        details.push("exact-dedupe schema outdated: apply migration 003_concurrent_dedupe");
+      }
       if (needsVector && !hasVector) details.push("vector search unavailable: run CREATE EXTENSION vector");
       if (needsVector && hasVector && !hasEmbeddingTable) {
         details.push(`vector table unavailable: run SELECT memory_core_ensure_embedding_dim(${this.embedder?.dims})`);
       }
       if (!hasMemoryTable) details.push("memories table unavailable: apply migrations");
       return {
-        ok: hasCurrentMemorySchema && (!needsVector || (hasVector && hasEmbeddingTable)),
+        ok: hasConcurrentDedupeSchema && (!needsVector || (hasVector && hasEmbeddingTable)),
         provider: "postgres",
         detail: details.join(" "),
       };

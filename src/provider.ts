@@ -46,11 +46,26 @@ export interface ContextBuildParams {
   };
 }
 
+/** Result of a provider-native exact-dedupe write. Providers that implement
+ * this operation must make the duplicate decision and reinforcement atomic
+ * across every process that shares their backing store. */
+export interface AtomicMemoryIngestResult {
+  created: boolean;
+  record: MemoryRecord;
+}
+
 export interface MemoryProvider {
   /** Provider-stage score gate used when callers omit minScore. The service
    *  uses this to reconstruct exact fail-open behavior after wide reranking. */
   readonly defaultMinScore?: number;
   ingest(records: MemoryRecord[]): Promise<MemoryRecord[]>;
+  /**
+   * Atomically creates a new active record or reinforces the active,
+   * non-expired exact duplicate. The service prefers this over its portable
+   * check-then-write fallback so durable providers can close cross-replica
+   * races at the storage boundary.
+   */
+  ingestOrReinforceExact?(candidate: MemoryRecord): Promise<AtomicMemoryIngestResult>;
   findDuplicate(candidate: MemoryRecord): Promise<MemoryRecord | null>;
   update(record: MemoryRecord): Promise<MemoryRecord>;
   search(query: MemorySearchQuery): Promise<MemorySearchHit[]>;

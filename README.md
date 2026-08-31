@@ -429,6 +429,7 @@ pgvector is optional at migrate time — the full-text path works without it.
 createdb memory_core_dev
 psql -d memory_core_dev -f migrations/001_init.sql
 psql -d memory_core_dev -f migrations/002_memory_spaces.sql
+psql -d memory_core_dev -f migrations/003_concurrent_dedupe.sql
 
 MEMORY_PROVIDER=postgres \
 MEMORY_PG_URL=postgres://localhost:5432/memory_core_dev \
@@ -437,8 +438,17 @@ npm run dev
 ```
 
 - `memories` carries a generated `search_vector tsvector` (summary weighted `A`, body `B`)
-  behind a partial GIN index, plus a generated `text_hash` for index-backed dedupe. Access
-  indexes cover both `(tenant_id, app_id)` provenance and `(tenant_id, space_id)` visibility.
+  behind a partial GIN index, plus a legacy `text_hash` retained for rollback compatibility.
+  Five partial SHA-256 expression indexes enforce one active exact memory at the tenant,
+  workspace, app, actor, and thread loci. Service writes use one Postgres `INSERT ... ON
+  CONFLICT DO UPDATE`, so concurrent replicas return the same winner id instead of racing a
+  pre-insert lookup.
+- Apply migration 003 before starting a binary that contains the atomic write path. The
+  migration blocks writes while it validates legacy decay-policy shapes, reconciles duplicates,
+  and builds the five indexes; reads continue. Old binaries do not understand the new invariant,
+  so do not run old and new writers concurrently during this schema transition. Prefer the
+  checksummed, ledger-idempotent `npm run migrate` runner; the raw migration 003 file is an
+  immutable transition and is not intended for manual replay after it commits.
 - Embeddings live in **one narrow table per dimension** (`memory_embeddings_384`, …).
   Provision each configured dimension during deployment with
   `SELECT memory_core_ensure_embedding_dim(dims)`. Search and ingest never run DDL.
@@ -577,6 +587,21 @@ Six MCP tools — `remember`, `recall`, `build_context`, `forget`, `supersede`, 
 generated from one zod source of truth, with adapters derived from it. Embedded mode owns its
 own provider; remote mode proxies a running service.
 
+The current exact-version compatibility evidence is:
+
+| Evidence | Frameworks/hosts |
+|---|---|
+| L2: real deterministic six-tool execution | Generic MCP, LangChain, LangGraph, OpenAI Agents (MCP and native adapter), AutoGen, CrewAI |
+| L1: real host connection and discovery | Hermes Agent, OpenClaw |
+| L0: isolated configuration acceptance/readback | Claude Code, Codex CLI |
+| L3: autonomous model selection with retained tool trace | **Not yet measured for any host** |
+
+One Postgres-backed service can support many agents. Give each agent a distinct principal key
+and `appId`; share tenant/space/actor for one person's actor memory, or share tenant/space and
+write `workspace` memories for a team of distinct role actors. App and thread scopes remain
+private. Memory Core is shared evidence storage, not a queue or work-ownership lock, and it
+does not automatically resolve semantically conflicting writes.
+
 ```bash
 npm run mcp              # run the MCP server over stdio
 npm run verify:mcp       # drives the full tool loop end to end
@@ -595,6 +620,11 @@ Two details that are easy to get wrong:
 Full setup for MCP clients, Anthropic and OpenAI tool use, the OpenAI Agents SDK, OpenClaw
 and Hermes — with an explicit verified / not-verified list — is in
 [`src/integrations/README.md`](src/integrations/README.md).
+
+The exact framework matrix, shared-instance patterns and completed fault-canary evidence are
+in [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md). The paired L3, task-uplift,
+multi-agent, 24-hour and seven-day experiment design is
+[`docs/AGENT_EVALUATION.md`](docs/AGENT_EVALUATION.md).
 
 ## Development
 
@@ -683,10 +713,14 @@ Deployment guidance, docker-compose, Kubernetes and the operational limits:
   evidence/version/current-head target architecture. **Start here.**
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) — every harness, metric definitions, full results.
 - [`bench/README.md`](bench/README.md) — synthetic dataset design and label integrity.
+- [`bench/framework-compat/README.md`](bench/framework-compat/README.md) — exact-version agent
+  framework probes and the single-node Postgres endurance/fault campaign.
 - [`docs/providers.md`](docs/providers.md) — provider internals and scoring formulas.
 - [`docs/WORKING_OVERVIEW.md`](docs/WORKING_OVERVIEW.md) — the write path and the read path.
 - [`docs/INTEGRATION_GUIDE.md`](docs/INTEGRATION_GUIDE.md) — application integration plus
   local Claude, Codex, and Hermes connections.
+- [`docs/AGENT_EVALUATION.md`](docs/AGENT_EVALUATION.md) — rigorous L3, memory-on/off,
+  multi-agent, 24-hour and seven-day outcome experiments.
 - [`docs/deployment.md`](docs/deployment.md) — secure local self-hosting and the limits before
   production deployment.
 - [`src/integrations/README.md`](src/integrations/README.md) — MCP and agent frameworks.

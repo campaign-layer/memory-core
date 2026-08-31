@@ -75,11 +75,43 @@ jobs:
           npx tsx bench/dataset/generate.ts --size=large
           git diff --exit-code -- bench/dataset/generated
 
+  framework-compat-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.20.0"
+
+      - run: npm --prefix bench/framework-compat ci
+
+      - name: Validate compatibility campaign programs
+        run: |
+          for file in bench/framework-compat/*.mjs; do node --check "$file"; done
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python3 -m py_compile bench/framework-compat/probe-python.py
+
+      - name: Exercise fail-closed run configuration generation
+        run: >-
+          node bench/framework-compat/generate-config.mjs
+          --run-id ci-smoke
+          --output "$RUNNER_TEMP/memory-core-framework-compat"
+          --duration-seconds 60
+          --fault-profile none
+
   postgres:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: "14"
+            image: postgres:14
+          - postgres: "16-pgvector"
+            image: pgvector/pgvector:pg16
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: ${{ matrix.image }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

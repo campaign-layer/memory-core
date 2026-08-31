@@ -1,0 +1,23 @@
+{
+  "name": "memory-core-framework-compat",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0 <25 || >=25.9.0"
+  },
+  "scripts": {
+    "probe:generic": "node probe-js.mjs generic-mcp",
+    "probe:langchain": "node probe-js.mjs langchain",
+    "probe:langgraph": "node probe-js.mjs langgraph",
+    "probe:openai": "node probe-js.mjs openai-agents"
+  },
+  "dependencies": {
+    "@langchain/core": "1.2.9",
+    "@langchain/langgraph": "1.4.13",
+    "@langchain/mcp-adapters": "1.1.4",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@openai/agents": "0.17.0",
+    "langchain": "1.5.10",
+    "zod": "4.5.4"
+  }
+}
