@@ -22,7 +22,7 @@ function row(name, value, baseline) {
   return `${name.padEnd(20)} ${bar(value)} ${pct(value)}  ${delta}`;
 }
 function printSuite(title, systems, metric, baselineName = "memory-core") {
-  const baseline = systems[baselineName]?.[metric] ?? null;
+  const baseline = systems[baselineName] ?? null;
   console.log(`\n${title} · ${metric}   (delta vs ${baselineName})`);
   console.log("─".repeat(72));
   for (const [name, value] of Object.entries(systems)) console.log(row(name, value, baseline));
