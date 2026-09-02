@@ -242,6 +242,10 @@ table is context only.
 
 Reproduce or inspect the current evidence:
 
+The TUI's non-comparable vendor bars are sourced from the dated, reviewable
+[`bench/provider-reference.json`](bench/provider-reference.json) manifest rather than embedded
+display constants.
+
 ```bash
 npm run bench:small
 npm run bench:tui

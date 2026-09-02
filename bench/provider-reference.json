@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "checkedAt": "2026-09-03",
+  "comparability": "reference-only",
+  "results": [
+    {
+      "label": "Mem0 managed LoCoMo",
+      "score": 0.925,
+      "metric": "vendor judged accuracy",
+      "product": "managed platform with proprietary optimizations",
+      "retrievalBudget": "top_200",
+      "source": "https://docs.mem0.ai/core-concepts/memory-evaluation"
+    },
+    {
+      "label": "Mem0 managed LongMem",
+      "score": 0.944,
+      "metric": "vendor judged accuracy",
+      "product": "managed platform with proprietary optimizations",
+      "retrievalBudget": "top_200",
+      "source": "https://docs.mem0.ai/core-concepts/memory-evaluation"
+    },
+    {
+      "label": "Supermemory LM R@15",
+      "score": 0.95,
+      "metric": "Recall@15 with aggregation",
+      "product": "hosted Supermemory",
+      "retrievalBudget": "top_15",
+      "source": "https://supermemory.ai/research/longmembench/"
+    },
+    {
+      "label": "Zep LoCoMo",
+      "score": 0.947,
+      "metric": "vendor judged accuracy",
+      "product": "hosted Zep",
+      "retrievalBudget": "vendor protocol",
+      "source": "https://www.getzep.com/research/"
+    },
+    {
+      "label": "Zep LongMemEval",
+      "score": 0.902,
+      "metric": "vendor judged accuracy",
+      "product": "hosted Zep",
+      "retrievalBudget": "vendor protocol",
+      "source": "https://www.getzep.com/research/"
+    }
+  ]
+}

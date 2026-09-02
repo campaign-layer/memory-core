@@ -899,6 +899,10 @@ state what still prevents a provider leaderboard claim.
   comparison is now explicitly provisional until a clean credentialed rerun is checked in.
 - Documented the minimum contract for a publishable provider leaderboard and added the exact
   commands for the local synthetic, LongMemEval, LoCoMo, mem0, and terminal-summary paths.
+- Moved TUI vendor-reference values into `bench/provider-reference.json`, including a review
+  date, metric, product path, retrieval budget, and official source URL for each row.
+- Corrected `omittedCandidateCount` so it covers retrieval hits and bounded profile candidates
+  actually considered for prompt emission, rather than every actor record scanned.
 
 ### How It Works Now
 
@@ -915,6 +919,10 @@ state what still prevents a provider leaderboard claim.
 
 - `README.md` — provider comparison, external references, artifact links, benchmark contract,
   and reproduction commands.
+- `bench/provider-reference.json` — dated provenance for non-comparable vendor reference bars.
+- `tools/benchmark-tui.mjs` — reads the provenance manifest and labels the full LongMemEval
+  row correctly as BM25-only.
+- `src/service.ts`, `src/service.test.ts` — bounded omission-count semantics and regression.
 - `docs/CODEX_RUN_SUMMARY.md` — this handoff entry.
 
 ### Validation
@@ -927,6 +935,8 @@ state what still prevents a provider leaderboard claim.
 - Markdown relative-link validation, `git diff --check`, and `npm run bench:tui` pass. The TUI
   reads the committed LoCoMo/LongMemEval artifacts and renders vendor figures as reference-only
   bars with no cross-protocol delta.
+- Node 20 full test suite: 185 tests, 184 passed, 0 failed, 1 optional skip. Runtime and benchmark
+  TypeScript checks pass.
 
 ### Risks / Follow-ups
 

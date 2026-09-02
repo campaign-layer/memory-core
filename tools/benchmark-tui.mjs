@@ -8,6 +8,7 @@ const root = path.resolve(new URL("..", import.meta.url).pathname);
 const longMemPath = path.join(root, "bench/longmemeval/results/modeA-fast.json");
 const locomoPath = path.join(root, "bench/locomo/results/mode_a.json");
 const syntheticPath = path.join(root, "bench/out/baseline-large.json");
+const providerReferencePath = path.join(root, "bench/provider-reference.json");
 
 function load(file) {
   try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; }
@@ -32,6 +33,7 @@ function printSuite(title, systems, metric, baselineName = "memory-core") {
 const long = load(longMemPath);
 const locomo = load(locomoPath);
 const synthetic = load(syntheticPath);
+const providerReference = load(providerReferencePath);
 console.log("MEMORY CORE BENCHMARK TUI");
 console.log(`commit ${process.env.MEMORY_CORE_BENCH_COMMIT || "working tree"}`);
 console.log("Bars are normalized 0–100%; missing providers are not inferred.");
@@ -67,14 +69,9 @@ if (synthetic?.systems) {
   printSuite("Synthetic MCIR (local, retrieval)", systems, "R@10", "in-memory");
 } else console.log("\nSynthetic MCIR large: run `npm run bench:large` to populate the artifact");
 
-console.log("\nPublished provider results · REFERENCE ONLY (different protocols)");
+console.log(`\nPublished provider results · REFERENCE ONLY (checked ${providerReference?.checkedAt || "unknown"})`);
 console.log("────────────────────────────────────────────────────────────────────────");
-console.log(row("Mem0 managed LoCoMo", 0.925, null));
-console.log(row("Mem0 managed LongMem", 0.944, null));
-console.log(row("Supermemory LM R@15", 0.950, null));
-console.log(row("Zep LoCoMo", 0.947, null));
-console.log(row("Zep LongMemEval", 0.902, null));
+for (const result of providerReference?.results || []) console.log(row(result.label, result.score, null));
 console.log("Vendor bars mix QA and retrieval metrics and are never used for deltas.");
 console.log("Use the same-harness LoCoMo panel for the defensible Mem0 comparison.");
-console.log("Sources: docs.mem0.ai/core-concepts/memory-evaluation");
-console.log("         supermemory.ai/research/longmembench · getzep.com/research");
+console.log(`Provenance: ${path.relative(root, providerReferencePath)}`);

@@ -233,6 +233,30 @@ test("buildContext never overflows when the reserved exact evidence line is too 
   assert.equal(context.omittedCandidateCount, 1);
 });
 
+test("buildContext omission count covers only retrieval and profile candidates actually considered", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const filters = { tenantId: "omission-tenant", appId: "omission-app", actorId: "omission-actor" };
+  await service.ingest({ observations: Array.from({ length: 100 }, (_, index) => ({
+    ...filters,
+    text: `profile record ${index} ${"long evidence ".repeat(20)}`,
+    memoryType: "fact" as const,
+    scope: "actor" as const,
+    source: { sourceType: "omission-count-regression", sourceId: String(index) },
+  })) });
+
+  const context = await service.buildContext({
+    query: "profile record",
+    filters,
+    budget: { maxItems: 1, maxChars: 300 },
+  });
+
+  // Search contributes at most maxItems*2 candidates and the profile renderer
+  // considers at most three records per type. The remaining actor corpus was
+  // never considered for prompt emission and must not inflate this signal.
+  assert.ok((context.omittedCandidateCount ?? 0) <= 5);
+});
+
 test("context renders relevant evidence before profile background and counts every emitted record", async () => {
   const provider = new InMemoryProvider();
   const service = new MemoryCoreService(provider);
