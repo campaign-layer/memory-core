@@ -44,6 +44,7 @@
     "bench:context": "tsx bench/context.ts --size=small",
     "bench:dataset": "tsx bench/dataset/generate.ts",
     "bench:typecheck": "tsc -p bench/tsconfig.json --noEmit",
+    "bench:tui": "node tools/benchmark-tui.mjs",
     "demo:shared": "node examples/shared-agent-demo.mjs",
     "dashboard:agents": "node tools/orchestration-dashboard.mjs",
     "verify:mcp": "tsx src/integrations/verify-mcp.ts",
