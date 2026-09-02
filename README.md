@@ -225,7 +225,8 @@ Memory Core with BM25/random controls only; its committed evidence is
 The following numbers explain what competitors publish and help define the target protocol.
 They are deliberately outside the tables above: metric type, ingestion unit, retrieval depth,
 context budget, reader/judge model, and proprietary product path differ. We compute **no delta
-against Memory Core** from these rows. References checked 2026-09-03.
+against Memory Core** from these rows. References captured at 2026-09-02T19:03:03Z (UTC) in
+[`bench/provider-reference.json`](bench/provider-reference.json).
 
 | vendor report | vendor-published result | material protocol differences |
 |---|---|---|

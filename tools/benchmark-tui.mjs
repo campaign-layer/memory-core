@@ -34,6 +34,14 @@ const long = load(longMemPath);
 const locomo = load(locomoPath);
 const synthetic = load(syntheticPath);
 const providerReference = load(providerReferencePath);
+if (
+  providerReference?.comparability !== "reference-only"
+  || !providerReference.checkedAt
+  || !Array.isArray(providerReference.results)
+  || providerReference.results.length === 0
+) {
+  throw new Error(`missing or invalid provider reference manifest: ${providerReferencePath}`);
+}
 console.log("MEMORY CORE BENCHMARK TUI");
 console.log(`commit ${process.env.MEMORY_CORE_BENCH_COMMIT || "working tree"}`);
 console.log("Bars are normalized 0–100%; missing providers are not inferred.");
@@ -69,9 +77,9 @@ if (synthetic?.systems) {
   printSuite("Synthetic MCIR (local, retrieval)", systems, "R@10", "in-memory");
 } else console.log("\nSynthetic MCIR large: run `npm run bench:large` to populate the artifact");
 
-console.log(`\nPublished provider results · REFERENCE ONLY (checked ${providerReference?.checkedAt || "unknown"})`);
+console.log(`\nPublished provider results · REFERENCE ONLY (checked ${providerReference.checkedAt})`);
 console.log("────────────────────────────────────────────────────────────────────────");
-for (const result of providerReference?.results || []) console.log(row(result.label, result.score, null));
+for (const result of providerReference.results) console.log(row(result.label, result.score, null));
 console.log("Vendor bars mix QA and retrieval metrics and are never used for deltas.");
 console.log("Use the same-harness LoCoMo panel for the defensible Mem0 comparison.");
 console.log(`Provenance: ${path.relative(root, providerReferencePath)}`);

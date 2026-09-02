@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "checkedAt": "2026-09-03",
+  "checkedAt": "2026-09-02T19:03:03Z",
   "comparability": "reference-only",
   "results": [
     {
@@ -12,7 +12,7 @@
       "source": "https://docs.mem0.ai/core-concepts/memory-evaluation"
     },
     {
-      "label": "Mem0 managed LongMem",
+      "label": "Mem0 managed LongMemEval",
       "score": 0.944,
       "metric": "vendor judged accuracy",
       "product": "managed platform with proprietary optimizations",

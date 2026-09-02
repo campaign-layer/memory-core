@@ -937,6 +937,9 @@ state what still prevents a provider leaderboard claim.
   bars with no cross-protocol delta.
 - Node 20 full test suite: 185 tests, 184 passed, 0 failed, 1 optional skip. Runtime and benchmark
   TypeScript checks pass.
+- Kimi Code 0.32.0 (`managed:kimi-code/k3`) reviewed commit `534218b` and returned `ADVISORY`
+  with no blocker or major finding. Its three minor provenance/display advisories were then
+  fixed: exact dataset naming, full UTC capture time, and fail-closed manifest loading.
 
 ### Risks / Follow-ups
 
