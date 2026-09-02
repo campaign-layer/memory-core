@@ -49,6 +49,12 @@ export function serverEnv(appId) {
 
 export function textOf(value) {
   if (typeof value === "string") return value;
+  if (value && typeof value === "object" && value.type === "text") return value.text || "";
+  // OpenAI Agents may preserve a function-call output as a content-part
+  // array (or wrap it in `{ output: ... }`) when serializing the Responses
+  // request. Normalize those shapes before parsing evidence rows.
+  if (Array.isArray(value)) return value.map((part) => textOf(part)).join("\n");
+  if (value && typeof value === "object" && "output" in value) return textOf(value.output);
   if (value && typeof value === "object" && Array.isArray(value.content)) {
     return value.content
       .filter((part) => part && part.type === "text")
@@ -310,6 +316,14 @@ function runSelfTest() {
   check(
     recalledExactMemory({ content: [{ type: "text", text: exact }], isError: false }, target),
     "MCP text content was not parsed",
+  );
+  check(
+    recalledExactMemory([{ type: "text", text: exact }], target),
+    "Responses content-part array was not parsed",
+  );
+  check(
+    recalledExactMemory({ output: [{ type: "text", text: exact }] }, target),
+    "Responses output wrapper was not parsed",
   );
   requireToolSuccess(
     { content: [{ type: "text", text: "Recorded \"useful\" for mem_target." }], isError: false },
