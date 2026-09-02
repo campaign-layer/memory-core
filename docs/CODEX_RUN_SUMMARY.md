@@ -877,3 +877,63 @@ for the parallel work. No new compatibility harness was created.
 - No L3 autonomous host run or paired memory-on/off O1/O2 outcome experiment has passed.
   Backup/restore, rolling deployment, multi-replica behavior, durable audit/metrics, and the
   seven-day quality/drift study remain open production gates.
+
+## Run: 2026-09-03 01:45 (WIB)
+
+### Scope
+
+Make the public provider comparison auditable: distinguish same-harness evidence from vendor
+marketing/reference numbers, expose the exact protocol and artifact behind each claim, and
+state what still prevents a provider leaderboard claim.
+
+### Changes
+
+- Added a compact Memory Core versus mem0 OSS and supermemory overview to `README.md`. The
+  mem0 comparison links directly to the committed LoCoMo retrieval, matched-denominator QA,
+  and artifact-index files; both Memory Core wins and mem0 wins remain visible.
+- Added a separately labelled vendor-reference table for current Mem0 managed, Supermemory,
+  and Zep results. It records retrieval depth, model, context budget, and product-path
+  differences and forbids computing deltas against Memory Core from those rows.
+- Corrected an overstatement about evidence retention: LoCoMo and LongMemEval result artifacts
+  are committed, while the historical synthetic/supermemory raw outputs are not. That
+  comparison is now explicitly provisional until a clean credentialed rerun is checked in.
+- Documented the minimum contract for a publishable provider leaderboard and added the exact
+  commands for the local synthetic, LongMemEval, LoCoMo, mem0, and terminal-summary paths.
+
+### How It Works Now
+
+1. Results generated under one Memory Core harness are eligible for a direct comparison only
+   when corpus, query set, metric implementation, and denominator match.
+2. Provider-published results remain reference targets in a separate table; their percentages
+   are never subtracted from or ranked beside Memory Core scores.
+3. Each public-dataset claim links to a committed JSON/text artifact containing its dataset
+   checksum, source revision, command, configuration, and denominator.
+4. Missing same-harness provider coverage is reported as `not measured`, and the synthetic
+   supermemory result retains its self-authored-dataset and missing-raw-artifact caveats.
+
+### Files Touched
+
+- `README.md` — provider comparison, external references, artifact links, benchmark contract,
+  and reproduction commands.
+- `docs/CODEX_RUN_SUMMARY.md` — this handoff entry.
+
+### Validation
+
+- Every Memory Core/mem0/LongMemEval value in the new overview was checked against
+  `bench/locomo/results/mode_a.json`, `bench/locomo/results/oracle_matched.txt`, and
+  `bench/longmemeval/results/modeA-fast.json`.
+- Mem0 managed, Supermemory, and Zep references were checked against each vendor's official
+  benchmark page on 2026-09-03.
+- Markdown relative-link validation, `git diff --check`, and `npm run bench:tui` pass. The TUI
+  reads the committed LoCoMo/LongMemEval artifacts and renders vendor figures as reference-only
+  bars with no cross-protocol delta.
+
+### Risks / Follow-ups
+
+- The historical synthetic/supermemory raw result files are not committed and came from
+  separate invocations on the same fixture; rerun them together on a clean frozen revision
+  before treating that row as durable release evidence.
+- No same-harness public-dataset comparison exists yet for supermemory, Zep/Graphiti, Letta,
+  or LangMem. Credentials and provider adapters are still needed for those rows.
+- Retrieval and constrained QA benchmarks do not prove autonomous agent task uplift. The
+  paired L3/O1/O2 memory-on/off campaign remains a separate release gate.

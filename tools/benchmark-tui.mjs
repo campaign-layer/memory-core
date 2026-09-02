@@ -38,14 +38,14 @@ console.log("Bars are normalized 0–100%; missing providers are not inferred.")
 
 if (long?.systems) {
   const systems = Object.fromEntries(Object.entries(long.systems).map(([name, value]) => [
-    name === "memory-core" ? "memory-core (hybrid)" : name,
+    name === "memory-core" ? "memory-core (BM25-only)" : name,
     value.overall?.recallAt?.["10"] ?? null,
   ]));
-  printSuite("LongMemEval-S (our harness, retrieval)", systems, "R@10", "memory-core (hybrid)");
+  printSuite("LongMemEval-S (our harness, retrieval)", systems, "R@10", "memory-core (BM25-only)");
   const mrr = Object.fromEntries(Object.entries(long.systems).map(([name, value]) => [
-    name === "memory-core" ? "memory-core (hybrid)" : name, value.overall?.mrr ?? null,
+    name === "memory-core" ? "memory-core (BM25-only)" : name, value.overall?.mrr ?? null,
   ]));
-  printSuite("LongMemEval-S (our harness, retrieval)", mrr, "MRR", "memory-core (hybrid)");
+  printSuite("LongMemEval-S (our harness, retrieval)", mrr, "MRR", "memory-core (BM25-only)");
 } else console.log("\nLongMemEval-S: result artifact not found");
 
 if (Array.isArray(locomo?.systems)) {
