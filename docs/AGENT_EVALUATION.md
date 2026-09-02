@@ -9,15 +9,17 @@ more work because it has memory. This plan defines the missing causal and longit
 | Question | Current evidence | Current conclusion |
 |---|---|---|
 | Can the service save and retrieve scoped records? | Unit/Postgres suites plus the six-tool MCP lifecycle | Yes, for the tested single-node providers and identities. |
-| Can several pinned agent-framework versions execute the tools? | Exact-version L2 probes for generic MCP, LangChain, LangGraph, OpenAI Agents, AutoGen and CrewAI | The pinned versions pass deterministically. Claude Code and Codex are only L0; Hermes and OpenClaw are L1. |
-| Does state survive bounded failures? | A 900-second Postgres canary with four application/database faults | Yes: `CANARY_PASSED`, zero acknowledged loss and zero isolation violations. This is not the 24-hour production qualification. |
+| Can several pinned agent-framework versions execute the tools? | Exact-version L2 probes for generic MCP, LangChain, LangGraph, OpenAI Agents, AutoGen and CrewAI | All passed at startup, but the completed 24-hour campaign failed its periodic L2 gates under corpus growth. The resulting context-selection and probe fixes still require a fresh qualification. Claude Code and Codex are only L0; Hermes and OpenClaw are L1. |
+| Does state survive bounded failures? | A 900-second Postgres canary and completed 24-hour workload, each with four application/database faults | The storage workload passed with zero acknowledged loss or isolation violations. The 24-hour campaign as a whole did not qualify because its periodic L2 context gates failed. |
 | Is retrieval competitive? | Synthetic, LongMemEval_S and LoCoMo runs through our harness | Hybrid retrieval is competitive at depth, but not consistently best at rank 1 or QA accuracy. |
 | Does memory improve a real agent's task success? | No paired model-driven memory-on/off experiment | Unknown. Do not infer this from the rows above. |
-| Does quality remain useful as memories accumulate and change? | No 7-day or high-noise longitudinal outcome run | Unknown. |
+| Does quality remain useful as memories accumulate and change? | The 24-hour mechanical run exposed a small-budget context-selection failure; no seven-day or scored outcome run exists | Unknown for agent outcomes; the discovered packing defect is fixed retrospectively but awaits rerun. |
 
-The completed canary used PostgreSQL with extraction and embedding disabled. It proves the
-service mechanics, identity boundaries, exact/lexical recall and persistence. It does not
-validate the semantic-quality numbers measured with the in-process hybrid configuration.
+The completed canary and 24-hour workload used PostgreSQL with extraction and embedding
+disabled. They test service mechanics, identity boundaries, exact/lexical recall and
+persistence. They do not validate the semantic-quality numbers measured with the in-process
+hybrid configuration, and the failed periodic framework gate prevents a production
+qualification claim for the tested revision.
 
 ## Evidence ladder
 

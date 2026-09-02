@@ -39,6 +39,14 @@ is retained on the bench host, not committed in this checkout; the repository co
 reproducible harness. A canary is not the 24-hour production qualification and it used lexical
 retrieval with extraction disabled.
 
+The later `e730f15` primary completed its full 24-hour storage workload with 242,651
+requests, 34,785 acknowledged writes, zero acknowledged loss or isolation violations, and all
+four fault recoveries passing. The campaign still finalized `FAILED`, `qualified:false`
+because all four periodic L2 batches failed under corpus growth. Twenty-five failures were
+genuine 1,000-character context omissions; three were query-header false positives in the old
+forget assertion. The current selection/probe fixes retrospectively cover those cases, but the
+patched revision is not qualified until a fresh canary and 24-hour rerun pass.
+
 ## Connect local agents to the shared service
 
 For Claude, Codex, and Hermes to share one memory space, run a single HTTP service and let

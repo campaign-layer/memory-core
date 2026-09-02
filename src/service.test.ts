@@ -13,7 +13,7 @@ import { createMemoryProvider } from "./providers/factory.js";
 import { FileProvider } from "./providers/file-provider.js";
 import { InMemoryProvider } from "./providers/in-memory-provider.js";
 import { MemoryCoreService } from "./service.js";
-import type { MemoryObservation, MemoryRecord } from "./types.js";
+import type { MemoryObservation, MemoryRecord, MemorySearchHit, MemorySearchQuery } from "./types.js";
 import { tokenize } from "./utils.js";
 
 test("client preserves a base path and encodes path/query identifiers", async () => {
@@ -129,6 +129,108 @@ test("buildContext enforces maxChars over the complete prompt and prioritizes re
   assert.ok(context.selectedMemories.some((memory) => /quantum saffron/.test(memory.text)));
   const selectedIds = new Set(context.selectedMemories.map((memory) => memory.id));
   assert.ok((context.profileMemories ?? []).every((memory) => !selectedIds.has(memory.id)));
+});
+
+test("buildContext reserves room for exact evidence already inside the ranked candidate set", async () => {
+  class FixtureRankProvider extends InMemoryProvider {
+    override async search(query: MemorySearchQuery): Promise<MemorySearchHit[]> {
+      const hits = await super.search({ ...query, limit: 100 });
+      return hits
+        .sort((a, b) => Number(a.memory.metadata.fixtureRank) - Number(b.memory.metadata.fixtureRank))
+        .slice(0, query.limit ?? 8);
+    }
+  }
+
+  const provider = new FixtureRankProvider();
+  const service = new MemoryCoreService(provider);
+  const shared = {
+    tenantId: "context-budget-regression-tenant",
+    appId: "context-budget-regression-application",
+    actorId: "context-budget-regression-actor",
+    memoryType: "tool_outcome" as const,
+    scope: "actor" as const,
+    source: { sourceType: "large-noisy-context-regression-source" },
+  };
+  const query = "budgetmarker exact target";
+
+  await service.ingest({
+    observations: [
+      ...Array.from({ length: 128 }, (_, index) => ({
+        ...shared,
+        text: `Unrelated accumulated actor history ${index}: ${"background filler ".repeat(4)}`,
+        metadata: { fixtureRank: 100 + index },
+      })),
+      ...Array.from({ length: 4 }, (_, index) => ({
+        ...shared,
+        text: `Higher ranked noisy evidence ${index}: target appears before exact and then budgetmarker`,
+        metadata: { fixtureRank: index },
+        confidence: 1,
+        importance: 1,
+      })),
+      {
+        ...shared,
+        text: `The just-written evidence contains ${query}`,
+        metadata: { fixtureRank: 4 },
+      },
+    ],
+  });
+
+  const ranked = await service.search({
+    query,
+    filters: { tenantId: shared.tenantId, appId: shared.appId, actorId: shared.actorId },
+    limit: 5,
+  });
+  assert.equal(ranked.length, 5);
+  assert.equal(ranked[4]?.memory.text, `The just-written evidence contains ${query}`);
+
+  const context = await service.buildContext({
+    query,
+    filters: { tenantId: shared.tenantId, appId: shared.appId, actorId: shared.actorId },
+    budget: { maxItems: 5, maxChars: 1_000 },
+  });
+
+  assert.ok(context.contextText.length <= 1_000);
+  assert.match(context.contextText, new RegExp(query));
+  assert.ok(context.selectedMemories.some((memory) => memory.text.includes(query)));
+  assert.deepEqual(
+    context.selectedMemories.map((memory) => memory.text),
+    ranked
+      .filter((hit) => context.selectedMemories.some((memory) => memory.id === hit.memory.id))
+      .map((hit) => hit.memory.text),
+    "budget-aware selection must preserve provider rank order",
+  );
+});
+
+test("buildContext never overflows when the reserved exact evidence line is too large", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const query = "oversized exact budget marker";
+  const filters = {
+    tenantId: "oversized-context-tenant",
+    appId: "oversized-context-application",
+    actorId: "oversized-context-actor",
+  };
+  await service.ingest({
+    observations: [{
+      ...filters,
+      text: `${query} ${"complete evidence must not be truncated ".repeat(20)}`,
+      memoryType: "tool_outcome",
+      scope: "actor",
+      source: { sourceType: "oversized-context-regression" },
+    }],
+  });
+
+  const context = await service.buildContext({
+    query,
+    filters,
+    budget: { maxItems: 5, maxChars: 300 },
+  });
+
+  assert.ok(context.contextText.length <= 300);
+  assert.equal(context.contextText, "");
+  assert.equal(context.selectedMemories.length, 0);
+  assert.equal(context.profileMemories?.length, 0);
+  assert.equal(context.omittedCandidateCount, 1);
 });
 
 test("context renders relevant evidence before profile background and counts every emitted record", async () => {

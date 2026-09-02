@@ -45,6 +45,7 @@
     "bench:dataset": "tsx bench/dataset/generate.ts",
     "bench:typecheck": "tsc -p bench/tsconfig.json --noEmit",
     "demo:shared": "node examples/shared-agent-demo.mjs",
+    "dashboard:agents": "node tools/orchestration-dashboard.mjs",
     "verify:mcp": "tsx src/integrations/verify-mcp.ts",
     "integrations:schemas": "tsx src/integrations/generate-schemas.ts",
     "mcp": "tsx src/integrations/mcp-server.ts"

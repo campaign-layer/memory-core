@@ -574,6 +574,11 @@ production qualification, or SOTA memory quality.
 Updated on 2026-08-31: the repaired 900-second canary completed `CANARY_PASSED`; see the next
 run entry. The frozen Claude review and 24-hour primary qualification remain open.
 
+Updated on 2026-09-02: the primary workload completed its full 24 hours and passed every
+durability, isolation, concurrency, timing, throughput, audit, and injected-fault gate, but
+the enclosing campaign correctly finalized `FAILED`, `qualified:false` because all four
+periodic L2 framework rechecks failed. See the 2026-09-02 terminal audit below.
+
 ### Canary defect and atomic-dedupe repair
 
 - A fresh exact-runtime canary passed all eleven framework startup probes and every runtime
@@ -702,7 +707,173 @@ rigorous path from autonomous L3 tool use to causal O1/O2 agent-outcome evidence
   a matched labeled quality run.
 - Direct competitor evidence is limited to supermemory on the internal synthetic suite and
   mem0 OSS 2.0.14 on LoCoMo through our harness.
-- The 24-hour primary, backup/restore, rolling deployment, multi-replica behavior and
-  seven-day quality/drift study remain open.
+- The 24-hour primary completed but did not qualify because its periodic L2 framework gates
+  failed. Backup/restore, rolling deployment, multi-replica behavior and the seven-day
+  quality/drift study remain open.
 - Automatic semantic contradiction resolution and transactional remote revision remain open;
   shared memory must not be used as a queue, lock or task lease.
+
+## Run: 2026-09-02 17:26 (WIB)
+
+### Scope
+
+Perform a fresh launch-readiness crawl after the detached 24-hour campaign reached its
+terminal state; separate storage/recovery evidence from agent-facing context failures and
+probe defects; and recheck the exact pushed revision, CI, build, types, and production
+dependency audit.
+
+### Changes
+
+- Recorded the terminal primary campaign as `FAILED`, `qualified:false`; the underlying
+  24-hour soak itself returned `PASSED` and failed no storage or operational gate.
+- Isolated two distinct periodic-probe findings. Twenty-five of 28 L2 rechecks omitted the
+  exact just-written memory from the 1,000-character `build_context` block under the grown
+  corpus. Their recall assertions were inconclusive because the same formatted header echoes
+  the short query marker. The three "forgotten memory remained visible" failures are likewise
+  not evidence of a storage leak: the probe matches that echoed header and skips the
+  authoritative REST readback after the false failure.
+- No product code changed in this crawl. The launch recommendation is now tied to fixing the
+  context-under-growth behavior and the probe assertion before repeating qualification.
+
+### How It Works Now
+
+1. The exact `e730f15` service sustained the configured 24-hour mixed-principal workload.
+2. The persistence oracle and final audit independently accounted for every acknowledged
+   active record across application/database restart and SIGKILL faults.
+3. Startup framework probes passed at their declared L0/L1/L2 levels. At 5, 10, 15, and 20
+   hours, every seven-framework L2 batch failed, so the campaign failed closed even though
+   the workload process exited successfully.
+4. Compatibility and memory quality remain separate claims: the existing protocol paths run,
+   but exact-evidence inclusion is not reliable at the probe's aggressive 1,000-character
+   budget under this corpus growth, and no autonomous L3 or memory-on/off outcome improvement
+   has been demonstrated.
+
+### Files Touched
+
+- `docs/CODEX_RUN_SUMMARY.md` — terminal campaign evidence and corrected launch status.
+
+### Validation
+
+- Remote primary: 242,651 requests, 242,649 successful, two expected fault-window errors,
+  34,785 acknowledged writes, five completed audits covering 67,886 record checks, and zero
+  unexpected/transport errors, isolation violations, acknowledged losses, unverified audit
+  rows, scheduler drops, concurrency failures, or mutation no-ops.
+- All four scheduled application/database graceful-restart and SIGKILL faults recovered; the
+  final audit accounted for 26,282/26,282 active records with zero lost or unverified.
+- Exact dedupe returned one durable id with `created=1`/`updated=19`; atomic feedback reached
+  `0 -> 20`. Full duration, target throughput, monotonic timing, source/image provenance,
+  resource coverage, and terminal artifact completeness all passed.
+- The normal workload's 2,000-character path completed 43,096/43,096 context requests with
+  every required marker present; context latency was 34.47 ms p50, 55.87 ms p95, 67.33 ms
+  p99, and 184.5 ms maximum. This narrows the periodic failure to retrieval and/or packing
+  under the smaller 1,000-character framework-probe budget rather than a general context or
+  persistence collapse; the terminal probe artifacts alone did not retain raw hit ranks.
+- `HEAD` and `origin/master` both equal `e730f15bd783e2ee8df0a8cea574352ac4e47568` with a clean
+  tree, no open pull requests, and green master CI. Application and benchmark typechecks,
+  production build, and `git diff --check` pass. The production dependency audit reports zero
+  vulnerabilities.
+- The local shell is Node 16.20.2, below the declared Node 20 floor, so its fetch-dependent
+  test failures are not treated as product regressions; green Node 20/22 GitHub CI covers the
+  exact unchanged revision.
+
+### Risks / Follow-ups
+
+- Fix and regression-test query-relevant context selection under large noisy actor corpora;
+  then rerun the existing canary and one full 24-hour qualification. Do not add another
+  harness for this gate.
+- Make framework probes assert structured tool success/data and authoritative record ids,
+  never marker substrings in echoed query headers.
+- Before a public launch, add at least one real L3 agent pilot and paired memory-on/off outcome
+  experiment. Production certification still additionally needs transactional revisions and
+  idempotent batches, durable audit/metrics, backup/restore, and multi-replica/rolling-deploy
+  drills.
+- There is still no repository tag, GitHub release, or published npm package.
+
+## Run: 2026-09-02 21:11 (WIB)
+
+### Scope
+
+Turn the terminal 24-hour failure into a causal fix, make the existing framework campaign's
+assertions trustworthy, run independent adversarial reviews, and add a local terminal view
+for the parallel work. No new compatibility harness was created.
+
+### Changes
+
+- Reconstructed every one of the 25 genuine context omissions against the preserved campaign
+  database. Each target was lexical rank 1/all-terms true but composite rank 3; two verbose,
+  higher-prior rows consumed the 1,000-character budget first. The new context selection
+  reserves the highest-ranked direct query-containing candidate already inside the provider's
+  `maxItems * 2` result set, fills the remaining budget in provider order, and renders the
+  final subset in provider order. The hard character bound and complete evidence lines remain
+  intact.
+- Added `omittedCandidateCount` to distinguish "matching candidates did not fit" from "no
+  memory exists". The agent tool now returns a truthful budget-omission message instead of a
+  false empty-store claim.
+- Hardened the existing JavaScript, Python, and OpenAI Runner probes. Recall checks parse exact
+  evidence rows rather than query-echoing headers; superseded/forgotten checks compare exact
+  memory text; mutation tools require exact receipts; every recall/context leg rejects tool
+  error wrappers; and REST state is checked before the post-forget negative recall assertion.
+- Added fail-closed parser/error self-tests to the existing framework CI job and regressions
+  for grown noisy corpora, an oversized reserved line, and truthful tool output.
+- Added `npm run dashboard:agents -- --watch=2`, backed by Git-ignored local state, to show
+  lanes, owners, elapsed time, Git state, and launch gates. It can initialize a fresh state,
+  add/update lanes and gates, and render once or continuously.
+- Updated the public integration, evaluation, endurance, and working-overview docs so the
+  completed storage workload is not presented as a qualified 24-hour framework run.
+
+### How It Works Now
+
+1. Retrieval remains provider-authoritative and fetches at most `maxItems * 2` candidates.
+2. Prompt assembly filters unverified evidence, reserves one complete direct-match line when
+   it fits, admits other lines under the remaining character/item budget, then restores
+   provider order for rendering.
+3. Every considered search/profile id not emitted is counted as an omitted candidate. An
+   empty context can therefore distinguish budget pressure from an actually empty store.
+4. Framework lifecycle evidence is accepted only from exact parsed memory rows plus scoped
+   REST corroboration; formatted query headers and error wrappers cannot satisfy absence or
+   presence checks.
+
+### Files Touched
+
+- `src/service.ts`, `src/types.ts`, and tests — budget-aware direct-evidence reservation and
+  omitted-candidate accounting.
+- `src/integrations/tools.ts` and tests — truthful all-omitted response.
+- `bench/framework-compat/probe-lib.mjs`, `probe-python.py`, and
+  `probe-openai-runner.mjs` — fail-closed exact lifecycle assertions.
+- `.github/workflows/ci.yml` — existing-harness parser/error self-tests.
+- `tools/orchestration-dashboard.mjs`, `package.json`, and `.gitignore` — local terminal
+  dashboard and private transient state.
+- `README.md`, `bench/framework-compat/README.md`, `docs/AGENT_EVALUATION.md`,
+  `docs/INTEGRATION_GUIDE.md`, `docs/WORKING_OVERVIEW.md`, and this run summary — corrected
+  evidence and behavior documentation.
+
+### Validation
+
+- Full application suite on Node 20.19.2 and Node 22.14.0: 184 tests, 183 passed, zero
+  failed, one optional ONNX integration skipped on each runtime.
+- Application typecheck, benchmark typecheck, production build, all framework `.mjs` syntax
+  checks, Python compile, JavaScript/Python adversarial self-tests, dashboard fresh-state and
+  mutation smoke checks, `git diff --check`, and production dependency audit all pass. The
+  audit reports zero vulnerabilities.
+- Preserved-database reconstruction found the exact target at final rank 3 in all 25/25
+  failed cases. Each reserved target line plus header is 378–422 characters, so the patch
+  would include all 25 under the original 1,000-character budget. This is retrospective
+  validation, not a substitute for a fresh live run.
+- Kimi CLI 0.32.0 (`managed:kimi-code/k3`) completed two minimized, read-only reviews. The
+  initial revision was `BLOCK`; the repair patch was `ADVISORY`. Its final requested error
+  guard, truthful all-omitted response, and oversized-line regression are implemented. Receipt
+  SHA-256: `91ee61b1930cace5a62c2eb123d37c66fa3432dc91f4496832ccae7de675beef`.
+- Claude Opus was `NOT_RUN`: the external export gate stopped before process creation and no
+  source was sent to Anthropic. The receipt records that fact; local causal findings must not
+  be represented as a Claude verdict.
+
+### Risks / Follow-ups
+
+- A fresh 900-second exact-framework/fault canary and full 24-hour qualification on the
+  patched commit are still mandatory. The branch is not production-qualified until both pass.
+- Reservation only applies to a direct textual match already inside the provider candidate
+  set and only when one complete evidence line fits. It is not graph/multi-hop retrieval,
+  token-aware packing, semantic contradiction resolution, or proof of agent task uplift.
+- No L3 autonomous host run or paired memory-on/off O1/O2 outcome experiment has passed.
+  Backup/restore, rolling deployment, multi-replica behavior, durable audit/metrics, and the
+  seven-day quality/drift study remain open production gates.

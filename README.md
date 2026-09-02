@@ -596,6 +596,12 @@ The current exact-version compatibility evidence is:
 | L0: isolated configuration acceptance/readback | Claude Code, Codex CLI |
 | L3: autonomous model selection with retained tool trace | **Not yet measured for any host** |
 
+Those L2 rows are exact-version deterministic execution evidence, not a current production
+qualification. The completed `e730f15` 24-hour workload passed its storage/fault gates but the
+campaign failed its periodic L2 context gates under corpus growth. This checkout contains the
+resulting context-selection and false-positive probe fixes; a fresh canary and 24-hour rerun
+remain required before claiming the patched revision is qualified.
+
 One Postgres-backed service can support many agents. Give each agent a distinct principal key
 and `appId`; share tenant/space/actor for one person's actor memory, or share tenant/space and
 write `workspace` memories for a team of distinct role actors. App and thread scopes remain
@@ -637,6 +643,7 @@ npm test                 # node:test — all pass; 1 skipped (ONNX, opt-in)
 npm run test:pg          # Postgres provider tests; needs a database
 npm run verify:mcp       # MCP server end to end over stdio
 npm run mcp              # run the MCP server
+npm run dashboard:agents -- --watch=2  # local parallel-work status; state stays Git-ignored
 
 npm run bench            # tsx bench/run.ts
 npm run bench:small      # --size=small -> bench/out/baseline-small.json
