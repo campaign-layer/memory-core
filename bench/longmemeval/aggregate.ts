@@ -35,15 +35,24 @@ interface Row {
  * reassigns questions to shards, so the same qid can land in two shard files and
  * would otherwise be counted twice.
  */
-function readSystem(system: string): Row[] {
+function readSystem(
+  system: string,
+  expectedSha: string,
+  expectedRoot: string,
+): { rows: Row[]; staleRowsIgnored: number } {
   const dir = path.join(MODE_A_DIR, system);
-  if (!fs.existsSync(dir)) return [];
+  if (!fs.existsSync(dir)) return { rows: [], staleRowsIgnored: 0 };
   const byQid = new Map<string, Row>();
+  let staleRowsIgnored = 0;
   for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".jsonl"))) {
     for (const line of fs.readFileSync(path.join(dir, f), "utf8").split("\n")) {
       if (!line.trim()) continue;
       try {
         const row = JSON.parse(line) as Row;
+        if (row.repoSha !== expectedSha || row.repoRoot !== expectedRoot) {
+          staleRowsIgnored += 1;
+          continue;
+        }
         // Prefer a successful row over an errored duplicate.
         const prev = byQid.get(row.qid);
         if (!prev || (prev.error && !row.error)) byQid.set(row.qid, row);
@@ -52,7 +61,7 @@ function readSystem(system: string): Row[] {
       }
     }
   }
-  return [...byQid.values()];
+  return { rows: [...byQid.values()], staleRowsIgnored };
 }
 
 function toItemsAndOutcomes(rows: Row[]) {
@@ -130,29 +139,40 @@ function main(): void {
   const systems = arg("systems").split(",").filter(Boolean);
   const tag = arg("tag", "run");
   const subsetPath = arg("subset", "");
+  const limit = Number(arg("limit", "0"));
 
   const manifest = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
+  const provenance = captureProvenance(DATASET_S, manifest.provenance?.dataset?.sha256);
+  if (provenance.repo.dirty) {
+    throw new Error("LongMemEval aggregation requires a clean tracked worktree");
+  }
   let zeroGold: string[] = manifest.zeroGoldQuestionIds;
+  let expectedQuestionIds: string[] = manifest.perQuestion.map((question: any) => question.questionId);
 
   // Restricting every system to one id set is what keeps a subsampled system
   // comparable to the rest: same questions, same corpora, same metrics.
   let subset: Set<string> | null = null;
   if (subsetPath) {
     subset = new Set<string>(JSON.parse(fs.readFileSync(subsetPath, "utf8")));
-    zeroGold = zeroGold.filter((q) => subset!.has(q));
+    expectedQuestionIds = expectedQuestionIds.filter((qid) => subset!.has(qid));
   }
+  if (limit > 0) expectedQuestionIds = expectedQuestionIds.slice(0, limit);
+  const expectedQuestions = new Set(expectedQuestionIds);
+  zeroGold = zeroGold.filter((qid) => expectedQuestions.has(qid));
 
   const raw: Record<string, Row[]> = {};
+  const staleRowsIgnored: Record<string, number> = {};
   for (const s of systems) {
-    const rows = readSystem(s);
-    raw[s] = subset ? rows.filter((r) => subset!.has(r.qid)) : rows;
+    const loaded = readSystem(s, provenance.repo.sha, provenance.repo.root);
+    raw[s] = loaded.rows.filter((row) => expectedQuestions.has(row.qid));
+    staleRowsIgnored[s] = loaded.staleRowsIgnored;
   }
 
   const report: any = {
     mode: "A-retrieval-only",
     tag,
     subset: subsetPath ? { file: subsetPath, size: subset!.size } : null,
-    provenance: captureProvenance(DATASET_S, manifest.provenance?.dataset?.sha256),
+    provenance,
     protocol: {
       corpus: "one memory per haystack turn, text = `${role}: ${content}`; one fresh corpus per question",
       sessionDate: "haystack_dates[sessionIndex] -> record firstSeenAt/lastSeenAt/createdAt AND metadata.sessionDate",
@@ -276,7 +296,18 @@ function main(): void {
   lines.push("");
 
   // Sanity block: the checks that would catch a broken or leaking harness.
-  const sanity: any = { flags: [] as string[] };
+  const sanity: any = { flags: [] as string[], fatalProvenanceFlags: [] as string[] };
+  sanity.staleRowsIgnored = staleRowsIgnored;
+  const expectedQuestionCount = expectedQuestionIds.length;
+  sanity.expectedQuestionsPerSystem = expectedQuestionCount;
+  for (const system of systems) {
+    const actual = raw[system]?.length ?? 0;
+    if (actual !== expectedQuestionCount) {
+      sanity.fatalProvenanceFlags.push(
+        `${system}: ${actual}/${expectedQuestionCount} rows from current SHA ${provenance.repo.sha}`,
+      );
+    }
+  }
   if (overallBySystem["random"] && report.systems["random"]) {
     const emp = overallBySystem["random"]!.recallAt[10]!;
     const ana = report.systems["random"].analyticRandomBaseline.recallAt[10]!;
@@ -298,10 +329,17 @@ function main(): void {
     sanity.runTimeShas[system] = p.repoShas;
     if (p.mixed) sanity.flags.push(`${system}: MIXED run-time SHAs ${p.repoShas.join(" + ")} - results are spliced across commits, do not report`);
     if (p.repoShas.includes("unstamped")) sanity.flags.push(`${system}: rows without a run-time SHA stamp`);
+    if (p.repoShas.length !== 1 || p.repoShas[0] !== provenance.repo.sha) {
+      sanity.fatalProvenanceFlags.push(
+        `${system}: worker SHA ${p.repoShas.join(" + ")} does not match report SHA ${provenance.repo.sha}`,
+      );
+    }
   }
   const allShas = [...new Set(Object.values(sanity.runTimeShas).flat() as string[])];
   sanity.singleShaAcrossSystems = allShas.length === 1;
   if (allShas.length > 1) sanity.flags.push(`systems were run at different SHAs: ${allShas.join(" + ")}`);
+  sanity.provenanceOk = sanity.fatalProvenanceFlags.length === 0;
+  sanity.flags.push(...sanity.fatalProvenanceFlags);
 
   // Any system named hybrid must have proven its vector leg ran.
   for (const system of systems) {
@@ -346,6 +384,8 @@ function main(): void {
   }
   lines.push(`- run-time SHA per system (stamped by the worker, not the scorer): ${JSON.stringify(sanity.runTimeShas)}`);
   lines.push(`- single SHA across all systems: ${sanity.singleShaAcrossSystems ? "yes" : "NO"}`);
+  lines.push(`- stale rows from other SHAs ignored: ${JSON.stringify(sanity.staleRowsIgnored)}`);
+  lines.push(`- current-SHA row completeness: ${sanity.provenanceOk ? "PASS" : "FAIL"} (${sanity.expectedQuestionsPerSystem} expected per system)`);
   for (const system of systems) {
     const v = report.systems[system]?.vectorLiveness;
     if (!v) continue;
@@ -367,6 +407,7 @@ function main(): void {
   fs.writeFileSync(mdPath, `${lines.join("\n")}\n`);
   console.log(lines.join("\n"));
   console.log(`\nwrote ${jsonPath}\nwrote ${mdPath}`);
+  if (!sanity.provenanceOk) process.exitCode = 1;
 }
 
 main();

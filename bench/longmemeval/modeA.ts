@@ -81,7 +81,12 @@ async function main(): Promise<void> {
   console.log(`\nshards finished in ${((Date.now() - t0) / 1000).toFixed(1)}s; ${failed} failed`);
   if (failed > 0) console.log(`WARNING: ${failed} shard(s) exited non-zero - rerun the same command to resume`);
 
-  const code = await run(TSX, path.join(HERE, "aggregate.ts"), [`--systems=${systems}`, `--tag=${tag}`, `--subset=${subset}`], "aggregate");
+  const code = await run(
+    TSX,
+    path.join(HERE, "aggregate.ts"),
+    [`--systems=${systems}`, `--tag=${tag}`, `--subset=${subset}`, `--limit=${limit}`],
+    "aggregate",
+  );
   console.log(`\nMode A wall clock: ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   process.exit(code);
 }

@@ -39,7 +39,10 @@ function loadDone(file: string): Set<string> {
     if (!line.trim()) continue;
     try {
       const row = JSON.parse(line);
-      if (!row.error) done.add(row.qid);
+      // A report tag names only the aggregate artifact; shard files are shared
+      // across runs. Resume only rows produced by this exact checkout, or a new
+      // commit will silently reuse an older commit's successful results.
+      if (!row.error && row.repoSha === RUN.sha && row.repoRoot === RUN.root) done.add(row.qid);
     } catch {
       // A torn final line from a killed process. Ignore it; the qid is redone.
     }
@@ -49,6 +52,9 @@ function loadDone(file: string): Set<string> {
 
 async function main(): Promise<void> {
   requirePrepared();
+  if (RUN.dirty) {
+    throw new Error("LongMemEval Mode A requires a clean tracked worktree; commit the code before producing rows");
+  }
   const shard = Number(arg("shard"));
   const shards = Number(arg("shards"));
   const seed = Number(arg("seed", "1234"));
