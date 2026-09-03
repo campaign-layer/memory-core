@@ -308,20 +308,12 @@ async function main(): Promise<void> {
         modeAInput.failures.join("\n"),
     );
   }
-  const apiKey = loadApiKey();
-  console.log(`retrieval system: ${RETRIEVAL_SYSTEM} — ${retrievalConfigLabel(RETRIEVAL_SYSTEM)}`);
-
   const qids = modeAInput.questionIds;
   const typeOf = new Map([...modeA.values()].map((r) => [r.qid, r.type]));
   const nGoldOf = new Map([...modeA.values()].map((r) => [r.qid, r.nGold]));
   const isAbstention = (qid: string) => (nGoldOf.get(qid) ?? 0) === 0;
-
-  fs.mkdirSync(MODE_B_DIR, { recursive: true });
-  const t0 = Date.now();
-  const providerCounts: Record<string, number> = {};
   const targetsByCondition = new Map<string, string[]>();
   const modeBRuns = new Map<string, ModeBRunIdentity>();
-
   for (const condition of conditions) {
     // Oracle feeds gold turns, so it is only defined for answerable questions.
     const answerable = qids.filter((q) => !isAbstention(q));
@@ -337,6 +329,19 @@ async function main(): Promise<void> {
       condition,
     };
     modeBRuns.set(condition, modeBRun);
+  }
+
+  // Validate every condition before loading credentials or making any paid call.
+  const apiKey = loadApiKey();
+  console.log(`retrieval system: ${RETRIEVAL_SYSTEM} — ${retrievalConfigLabel(RETRIEVAL_SYSTEM)}`);
+
+  fs.mkdirSync(MODE_B_DIR, { recursive: true });
+  const t0 = Date.now();
+  const providerCounts: Record<string, number> = {};
+
+  for (const condition of conditions) {
+    const target = targetsByCondition.get(condition)!;
+    const modeBRun = modeBRuns.get(condition)!;
 
     const out = path.join(MODE_B_DIR, `${condition}.jsonl`);
     const cached = readModeB(out, modeBRun);
