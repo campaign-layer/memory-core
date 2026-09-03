@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseNonNegativeInteger, parseSubsetQuestionIds, parseSystemNames } from "./integrity.js";
 import { HARNESS_ROOT, MODE_A_DIR, requirePrepared, resolveTsx } from "./paths.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -59,12 +60,14 @@ async function main(): Promise<void> {
   }
   requirePrepared();
   const TSX = resolveTsx();
-  const shards = Number(arg("shards", "12"));
-  const systems = arg("systems");
-  const limit = arg("limit", "0");
-  const seed = arg("seed", "1234");
+  const shards = parseNonNegativeInteger(arg("shards", "12"), "shards");
+  if (shards === 0) throw new Error("--shards must be greater than zero");
+  const systems = parseSystemNames(arg("systems")).join(",");
+  const limit = parseNonNegativeInteger(arg("limit", "0"), "limit");
+  const seed = parseNonNegativeInteger(arg("seed", "1234"), "seed");
   const tag = arg("tag", "full");
   const subset = arg("subset", "");
+  if (subset) parseSubsetQuestionIds(JSON.parse(fs.readFileSync(subset, "utf8")));
 
   fs.mkdirSync(MODE_A_DIR, { recursive: true });
   const t0 = Date.now();
@@ -81,7 +84,12 @@ async function main(): Promise<void> {
   console.log(`\nshards finished in ${((Date.now() - t0) / 1000).toFixed(1)}s; ${failed} failed`);
   if (failed > 0) console.log(`WARNING: ${failed} shard(s) exited non-zero - rerun the same command to resume`);
 
-  const code = await run(TSX, path.join(HERE, "aggregate.ts"), [`--systems=${systems}`, `--tag=${tag}`, `--subset=${subset}`], "aggregate");
+  const code = await run(
+    TSX,
+    path.join(HERE, "aggregate.ts"),
+    [`--systems=${systems}`, `--tag=${tag}`, `--subset=${subset}`, `--limit=${limit}`, `--seed=${seed}`],
+    "aggregate",
+  );
   console.log(`\nMode A wall clock: ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   process.exit(code);
 }

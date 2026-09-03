@@ -24,6 +24,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { buildCorpus, loadQuestion, type LmeQuestion } from "./dataset.js";
 import {
+  aggregateExitCode, datasetShaFromManifest, modeBRowMatchesRun,
+  parseNonNegativeInteger, requireNonEmptyQuestionSelection, rowMatchesRun,
+  selectCompleteRunRows, systemRunFailures,
+  type ModeARunIdentity, type ModeBRunIdentity,
+} from "./integrity.js";
+import {
   DATASET_S, MANIFEST, MODE_B_DIR, requireModeA, requirePrepared, RESULTS_DIR,
 } from "./paths.js";
 import { captureProvenance } from "./provenance.js";
@@ -120,7 +126,7 @@ const ABSTAIN_JUDGE_SYSTEM = [
 
 interface ModeARow {
   qid: string; type: string; nGold: number; ranking: Array<[string, number]>;
-  repoSha?: string; repoRoot?: string;
+  repoSha?: string; repoRoot?: string; datasetSha?: string; seed?: number; error?: string;
 }
 
 const USAGE = [
@@ -133,6 +139,7 @@ const USAGE = [
   "  --oracle-n=N     size of the stratified oracle subsample (default 150)",
   "  --concurrency=N  in-flight OpenRouter requests (default 8)",
   "  --limit=N        only the first N questions (smoke tests)",
+  "  --seed=N         Mode A random-control seed / cache identity (default 1234)",
   "  --retrieval-system=NAME  which Mode A ranking to read (default memory-core,",
   "                           which is the BM25-only configuration)",
   "",
@@ -149,33 +156,51 @@ function arg(name: string, fallback?: string): string {
   process.exit(2);
 }
 
-function readModeA(system: string): Map<string, ModeARow> {
+function readModeA(
+  system: string,
+  expectedRun: ModeARunIdentity,
+): { rows: Map<string, ModeARow>; staleRowsIgnored: number } {
   const dir = requireModeA(system);
   const map = new Map<string, ModeARow>();
+  let staleRowsIgnored = 0;
   for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".jsonl"))) {
     for (const line of fs.readFileSync(path.join(dir, f), "utf8").split("\n")) {
       if (!line.trim()) continue;
-      try { const r = JSON.parse(line) as ModeARow; map.set(r.qid, r); } catch { /* torn line */ }
+      try {
+        const row = JSON.parse(line) as ModeARow;
+        if (!rowMatchesRun(row, expectedRun)) {
+          staleRowsIgnored += 1;
+          continue;
+        }
+        const previous = map.get(row.qid);
+        if (!previous || (previous.error && !row.error)) map.set(row.qid, row);
+      } catch { /* torn line */ }
     }
   }
   if (map.size === 0) throw new Error(`Mode A results for ${system} are empty`);
-  return map;
+  return { rows: map, staleRowsIgnored };
 }
 
-function readJsonl(file: string): any[] {
-  if (!fs.existsSync(file)) return [];
-  const rows: any[] = [];
-  const seen = new Set<string>();
+function readModeB(
+  file: string,
+  expectedRun: ModeBRunIdentity,
+): { rows: any[]; staleRowsIgnored: number } {
+  if (!fs.existsSync(file)) return { rows: [], staleRowsIgnored: 0 };
+  const byQid = new Map<string, any>();
+  let staleRowsIgnored = 0;
   for (const line of fs.readFileSync(file, "utf8").split("\n")) {
     if (!line.trim()) continue;
     try {
-      const r = JSON.parse(line);
-      if (seen.has(r.qid)) continue;
-      seen.add(r.qid);
-      rows.push(r);
+      const row = JSON.parse(line);
+      if (!modeBRowMatchesRun(row, expectedRun)) {
+        staleRowsIgnored += 1;
+        continue;
+      }
+      const previous = byQid.get(row.qid);
+      if (!previous || (previous.error && !row.error)) byQid.set(row.qid, row);
     } catch { /* torn line */ }
   }
-  return rows;
+  return { rows: [...byQid.values()], staleRowsIgnored };
 }
 
 let truncations = 0;
@@ -240,39 +265,92 @@ async function main(): Promise<void> {
     return;
   }
   requirePrepared();
-  const conditions = arg("conditions", "k10,k30,oracle").split(",").filter(Boolean);
-  const limit = Number(arg("limit", "0"));
-  const oracleN = Number(arg("oracle-n", "150"));
-  const concurrency = Number(arg("concurrency", "8"));
+  const conditions = arg("conditions", "k10,k30,oracle").split(",").map((x) => x.trim()).filter(Boolean);
+  if (conditions.length === 0 || new Set(conditions).size !== conditions.length) {
+    throw new Error("--conditions must contain one or more unique condition names");
+  }
+  const unknownConditions = conditions.filter((condition) => !["k10", "k30", "oracle"].includes(condition));
+  if (unknownConditions.length > 0) throw new Error(`unknown condition(s): ${unknownConditions.join(", ")}`);
+  const limit = parseNonNegativeInteger(arg("limit", "0"), "limit");
+  const oracleN = parseNonNegativeInteger(arg("oracle-n", "150"), "oracle-n");
+  const concurrency = parseNonNegativeInteger(arg("concurrency", "8"), "concurrency");
+  const seed = parseNonNegativeInteger(arg("seed", "1234"), "seed");
+  if (oracleN === 0) throw new Error("--oracle-n must be greater than zero");
+  if (concurrency === 0) throw new Error("--concurrency must be greater than zero");
   const tag = arg("tag", "full");
   const RETRIEVAL_SYSTEM = arg("retrieval-system", DEFAULT_RETRIEVAL_SYSTEM);
 
-  const apiKey = loadApiKey();
-  const modeA = readModeA(RETRIEVAL_SYSTEM);
-  console.log(`retrieval system: ${RETRIEVAL_SYSTEM} — ${retrievalConfigLabel(RETRIEVAL_SYSTEM)}`);
   const manifest = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
-
-  let qids = [...modeA.keys()].sort();
-  if (limit > 0) qids = qids.slice(0, limit);
+  const datasetSha = datasetShaFromManifest(manifest);
+  const provenance = captureProvenance(DATASET_S, datasetSha);
+  if (provenance.repo.dirty) {
+    throw new Error("LongMemEval Mode B requires a clean worktree, including untracked source and configuration files");
+  }
+  const modeARun: ModeARunIdentity = {
+    repoSha: provenance.repo.sha,
+    repoRoot: provenance.repo.root,
+    datasetSha,
+    seed,
+  };
+  const loadedModeA = readModeA(RETRIEVAL_SYSTEM, modeARun);
+  const modeA = loadedModeA.rows;
+  const manifestQuestionIds: string[] = manifest.perQuestion.map((question: any) => question.questionId);
+  const modeAInput = selectCompleteRunRows(
+    `Mode A ${RETRIEVAL_SYSTEM}`,
+    [...modeA.values()],
+    manifestQuestionIds,
+    limit,
+    modeARun,
+  );
+  if (modeAInput.failures.length > 0) {
+    throw new Error(
+      `Mode A input is incomplete or invalid; rerun Mode A before spending on Mode B:\n` +
+        modeAInput.failures.join("\n"),
+    );
+  }
+  const qids = modeAInput.questionIds;
   const typeOf = new Map([...modeA.values()].map((r) => [r.qid, r.type]));
   const nGoldOf = new Map([...modeA.values()].map((r) => [r.qid, r.nGold]));
   const isAbstention = (qid: string) => (nGoldOf.get(qid) ?? 0) === 0;
-
-  fs.mkdirSync(MODE_B_DIR, { recursive: true });
-  const t0 = Date.now();
-  const providerCounts: Record<string, number> = {};
-
+  const targetsByCondition = new Map<string, string[]>();
+  const modeBRuns = new Map<string, ModeBRunIdentity>();
   for (const condition of conditions) {
     // Oracle feeds gold turns, so it is only defined for answerable questions.
     const answerable = qids.filter((q) => !isAbstention(q));
     const target = condition === "oracle"
       ? (limit > 0 ? answerable : stratifiedSubsample(answerable, typeOf, oracleN))
       : qids;
+    requireNonEmptyQuestionSelection(target, `Mode B ${condition}`);
+    targetsByCondition.set(condition, target);
+    const modeBRun: ModeBRunIdentity = {
+      ...modeARun,
+      retrievalSystem: RETRIEVAL_SYSTEM,
+      model: MODEL,
+      condition,
+    };
+    modeBRuns.set(condition, modeBRun);
+  }
+
+  // Validate every condition before loading credentials or making any paid call.
+  const apiKey = loadApiKey();
+  console.log(`retrieval system: ${RETRIEVAL_SYSTEM} — ${retrievalConfigLabel(RETRIEVAL_SYSTEM)}`);
+
+  fs.mkdirSync(MODE_B_DIR, { recursive: true });
+  const t0 = Date.now();
+  const providerCounts: Record<string, number> = {};
+
+  for (const condition of conditions) {
+    const target = targetsByCondition.get(condition)!;
+    const modeBRun = modeBRuns.get(condition)!;
 
     const out = path.join(MODE_B_DIR, `${condition}.jsonl`);
-    const done = new Set(readJsonl(out).filter((r) => !r.error).map((r) => r.qid));
+    const cached = readModeB(out, modeBRun);
+    const done = new Set(cached.rows.filter((r) => !r.error).map((r) => r.qid));
     const todo = target.filter((q) => !done.has(q));
-    console.log(`[${condition}] target=${target.length} todo=${todo.length} (resumed ${done.size})`);
+    console.log(
+      `[${condition}] target=${target.length} todo=${todo.length} ` +
+        `(resumed ${done.size}, ignored ${cached.staleRowsIgnored} stale rows)`,
+    );
 
     let completed = 0;
     await pool(todo, concurrency, async (qid) => {
@@ -293,6 +371,12 @@ async function main(): Promise<void> {
       const record: any = {
         qid, type: corpus.questionType, condition, population: abstain ? "abstention" : "answerable",
         rubric, nContext: ids.length, nGold: corpus.goldIds.length, gold: corpus.answer,
+        repoSha: modeBRun.repoSha,
+        repoRoot: modeBRun.repoRoot,
+        datasetSha: modeBRun.datasetSha,
+        seed: modeBRun.seed,
+        retrievalSystem: modeBRun.retrievalSystem,
+        model: modeBRun.model,
       };
 
       try {
@@ -339,7 +423,7 @@ async function main(): Promise<void> {
   const report: any = {
     mode: "B-qa-with-llm-judge",
     tag,
-    provenance: captureProvenance(DATASET_S, manifest.provenance?.dataset?.sha256),
+    provenance,
     model: {
       answerer: MODEL, judge: MODEL, temperature: 0,
       answerMaxTokens: ANSWER_MAX_TOKENS, judgeMaxTokens: JUDGE_MAX_TOKENS,
@@ -355,6 +439,9 @@ async function main(): Promise<void> {
       retrievalConfig: retrievalConfigLabel(RETRIEVAL_SYSTEM),
       repoShas: [...new Set([...modeA.values()].map((r) => r.repoSha ?? "unstamped"))].sort(),
       repoRoots: [...new Set([...modeA.values()].map((r) => r.repoRoot ?? "unknown"))].sort(),
+      datasetShas: [...new Set([...modeA.values()].map((r) => r.datasetSha ?? "unstamped"))].sort(),
+      seeds: [...new Set([...modeA.values()].map((r) => r.seed ?? "unstamped"))],
+      staleRowsIgnored: loadedModeA.staleRowsIgnored,
     },
     protocol: {
       retrievalFrom: `Mode A ranking of system "${RETRIEVAL_SYSTEM}" (${retrievalConfigLabel(RETRIEVAL_SYSTEM)})`,
@@ -367,6 +454,7 @@ async function main(): Promise<void> {
       judgeSeesContext: false,
       oracleSubsample: `answerable only, stratified by question_type, n≈${oracleN}, deterministic`,
       maxMemoryChars: MAX_MEMORY_CHARS,
+      seed,
       memoryTruncationsThisRun: truncations,
       providerRouting: "OpenRouter default routing; the serving upstream varies per call and is recorded per row",
     },
@@ -385,10 +473,16 @@ async function main(): Promise<void> {
   const ansTable = ["| condition | n | correct | accuracy | said IDK | errors |", "|---|---|---|---|---|---|"];
   const absTable = ["| condition | n | correctly declined | accuracy |", "|---|---|---|---|"];
   const perTypeAcc: Record<string, Record<string, string>> = {};
+  const fatalRunFlags: string[] = [];
+  const staleModeBRowsIgnored: Record<string, number> = {};
 
   for (const condition of conditions) {
-    const rows = readJsonl(path.join(MODE_B_DIR, `${condition}.jsonl`))
-      .filter((r) => (limit > 0 ? qids.includes(r.qid) : true));
+    const target = targetsByCondition.get(condition)!;
+    const targetSet = new Set(target);
+    const loaded = readModeB(path.join(MODE_B_DIR, `${condition}.jsonl`), modeBRuns.get(condition)!);
+    const rows = loaded.rows.filter((r) => targetSet.has(r.qid));
+    staleModeBRowsIgnored[condition] = loaded.staleRowsIgnored;
+    fatalRunFlags.push(...systemRunFailures(`Mode B ${condition}`, rows, target, modeARun));
     if (rows.length === 0) continue;
 
     for (const r of rows) {
@@ -451,6 +545,12 @@ async function main(): Promise<void> {
 
   report.totals = { promptTokens: grandIn, completionTokens: grandOut, costUsd: grandCost, wallClockSec: (Date.now() - t0) / 1000 };
   report.providerCounts = providerCounts;
+  report.integrity = {
+    ok: fatalRunFlags.length === 0,
+    fatalRunFlags,
+    staleModeBRowsIgnored,
+    cacheIdentity: { ...modeARun, retrievalSystem: RETRIEVAL_SYSTEM, model: MODEL },
+  };
 
   lines.push("## Accuracy, ANSWERABLE questions (strict judge)");
   lines.push("");
@@ -484,6 +584,7 @@ async function main(): Promise<void> {
   console.log(`\n${lines.join("\n")}`);
   console.log(`\nwrote ${path.join(RESULTS_DIR, `modeB-${tag}.json`)}`);
   console.log(`Mode B wall clock: ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  process.exitCode = aggregateExitCode(fatalRunFlags);
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

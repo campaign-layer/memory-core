@@ -4,6 +4,7 @@
   "type": "module",
   "description": "LongMemEval_S harness for memory-core. Mode A = retrieval only, Mode B = QA with an LLM reader and judge.",
   "scripts": {
+    "test": "tsx --test integrity.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "mode-a": "./run-modeA.sh",
     "mode-b": "./run-modeB.sh",
