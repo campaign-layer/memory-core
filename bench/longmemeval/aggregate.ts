@@ -10,6 +10,11 @@ import {
   type QueryOutcome, type RankMetrics,
 } from "../metrics.js";
 import type { EvalItem } from "../types.js";
+import {
+  aggregateExitCode, datasetShaFromManifest, parseNonNegativeInteger,
+  parseSubsetQuestionIds, parseSystemNames, rowMatchesRun, selectQuestionIds,
+  systemRunFailures, type ModeARunIdentity,
+} from "./integrity.js";
 import { MANIFEST, MODE_A_DIR, RESULTS_DIR, DATASET_S, requirePrepared } from "./paths.js";
 import { captureProvenance } from "./provenance.js";
 import { RETRIEVAL_DEPTH, retrievalConfigLabel } from "./systems.js";
@@ -26,7 +31,7 @@ interface Row {
   nCorpus: number; nGold: number; goldIds: string[];
   ranking: Array<[string, number]>;
   ingestMs: number; searchMs: number; error?: string;
-  repoSha?: string; repoRoot?: string; note?: string;
+  repoSha?: string; repoRoot?: string; datasetSha?: string; seed?: number; note?: string;
   vectorCredited?: number | null; storedVectors?: number | null; sampleReasons?: string[] | null;
 }
 
@@ -37,8 +42,7 @@ interface Row {
  */
 function readSystem(
   system: string,
-  expectedSha: string,
-  expectedRoot: string,
+  expectedRun: ModeARunIdentity,
 ): { rows: Row[]; staleRowsIgnored: number } {
   const dir = path.join(MODE_A_DIR, system);
   if (!fs.existsSync(dir)) return { rows: [], staleRowsIgnored: 0 };
@@ -49,7 +53,7 @@ function readSystem(
       if (!line.trim()) continue;
       try {
         const row = JSON.parse(line) as Row;
-        if (row.repoSha !== expectedSha || row.repoRoot !== expectedRoot) {
+        if (!rowMatchesRun(row, expectedRun)) {
           staleRowsIgnored += 1;
           continue;
         }
@@ -123,7 +127,7 @@ function arg(name: string, fallback?: string): string {
   if (hit) return hit.slice(prefix.length);
   if (fallback !== undefined) return fallback;
   console.error(
-    "usage: npx tsx aggregate.ts --systems=a,b,c [--tag=NAME] [--subset=FILE]\n" +
+    "usage: npx tsx aggregate.ts --systems=a,b,c [--tag=NAME] [--subset=FILE] [--limit=N] [--seed=N]\n" +
       "  Re-scores Mode A JSONL shards already on disk. modeA.ts runs this for you.\n" +
       `\nerror: missing --${name}`,
   );
@@ -132,38 +136,44 @@ function arg(name: string, fallback?: string): string {
 
 function main(): void {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    console.log("usage: npx tsx aggregate.ts --systems=a,b,c [--tag=NAME] [--subset=FILE]");
+    console.log("usage: npx tsx aggregate.ts --systems=a,b,c [--tag=NAME] [--subset=FILE] [--limit=N] [--seed=N]");
     return;
   }
   requirePrepared();
-  const systems = arg("systems").split(",").filter(Boolean);
+  const systems = parseSystemNames(arg("systems"));
   const tag = arg("tag", "run");
   const subsetPath = arg("subset", "");
-  const limit = Number(arg("limit", "0"));
+  const limit = parseNonNegativeInteger(arg("limit", "0"), "limit");
+  const seed = parseNonNegativeInteger(arg("seed", "1234"), "seed");
 
   const manifest = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
-  const provenance = captureProvenance(DATASET_S, manifest.provenance?.dataset?.sha256);
+  const datasetSha = datasetShaFromManifest(manifest);
+  const provenance = captureProvenance(DATASET_S, datasetSha);
   if (provenance.repo.dirty) {
     throw new Error("LongMemEval aggregation requires a clean tracked worktree");
   }
+  const expectedRun: ModeARunIdentity = {
+    repoSha: provenance.repo.sha,
+    repoRoot: provenance.repo.root,
+    datasetSha,
+    seed,
+  };
   let zeroGold: string[] = manifest.zeroGoldQuestionIds;
-  let expectedQuestionIds: string[] = manifest.perQuestion.map((question: any) => question.questionId);
 
   // Restricting every system to one id set is what keeps a subsampled system
   // comparable to the rest: same questions, same corpora, same metrics.
-  let subset: Set<string> | null = null;
-  if (subsetPath) {
-    subset = new Set<string>(JSON.parse(fs.readFileSync(subsetPath, "utf8")));
-    expectedQuestionIds = expectedQuestionIds.filter((qid) => subset!.has(qid));
-  }
-  if (limit > 0) expectedQuestionIds = expectedQuestionIds.slice(0, limit);
+  const subsetIds = subsetPath
+    ? parseSubsetQuestionIds(JSON.parse(fs.readFileSync(subsetPath, "utf8")))
+    : null;
+  const manifestQuestionIds: string[] = manifest.perQuestion.map((question: any) => question.questionId);
+  const expectedQuestionIds = selectQuestionIds(manifestQuestionIds, subsetIds, limit);
   const expectedQuestions = new Set(expectedQuestionIds);
   zeroGold = zeroGold.filter((qid) => expectedQuestions.has(qid));
 
   const raw: Record<string, Row[]> = {};
   const staleRowsIgnored: Record<string, number> = {};
   for (const s of systems) {
-    const loaded = readSystem(s, provenance.repo.sha, provenance.repo.root);
+    const loaded = readSystem(s, expectedRun);
     raw[s] = loaded.rows.filter((row) => expectedQuestions.has(row.qid));
     staleRowsIgnored[s] = loaded.staleRowsIgnored;
   }
@@ -171,7 +181,16 @@ function main(): void {
   const report: any = {
     mode: "A-retrieval-only",
     tag,
-    subset: subsetPath ? { file: subsetPath, size: subset!.size } : null,
+    subset: subsetPath
+      ? {
+          file: subsetPath,
+          size: expectedQuestionIds.length,
+          requestedSize: subsetIds!.length,
+          selectedSize: expectedQuestionIds.length,
+        }
+      : null,
+    limit: limit > 0 ? limit : null,
+    runIdentity: expectedRun,
     provenance,
     protocol: {
       corpus: "one memory per haystack turn, text = `${role}: ${content}`; one fresh corpus per question",
@@ -181,6 +200,7 @@ function main(): void {
       retrievalDepth: RETRIEVAL_DEPTH,
       ks: KS,
       minScore: 0,
+      seed,
       uniformFields: "memoryType=episode, confidence=0.8, importance=0.5 for every turn, so no label can leak via ranking features",
       missPenalty: "unretrieved gold is charged meanCorpusSize+1 in meanRank (bench/metrics.ts convention)",
     },
@@ -196,7 +216,14 @@ function main(): void {
   lines.push(`# LongMemEval Mode A (retrieval only) - memory-core internal harness`);
   lines.push("");
   lines.push(`Repo ${report.provenance.repo.sha.slice(0, 7)} (${report.provenance.repo.branch}), node ${report.provenance.nodeVersion}, dataset sha256 ${report.provenance.dataset.sha256.slice(0, 16)}...`);
-  if (subsetPath) lines.push(`\nRestricted to the ${subset!.size}-question stratified subset \`${subsetPath}\`. Every system below is scored on these same questions.`);
+  if (subsetPath) {
+    lines.push(
+      `\nSelected ${expectedQuestionIds.length} of ${subsetIds!.length} questions from stratified subset ` +
+        `\`${subsetPath}\`${limit > 0 ? ` (limit ${limit})` : ""}. Every system below is scored on these same questions.`,
+    );
+  } else if (limit > 0) {
+    lines.push(`\nRestricted to the first ${expectedQuestionIds.length} question ids in lexical order (limit ${limit}).`);
+  }
   lines.push("");
 
   const overallBySystem: Record<string, RankMetrics> = {};
@@ -227,6 +254,8 @@ function main(): void {
     // Provenance is taken from the ROWS, not from the working tree at scoring time.
     const shas = [...new Set(rows.map((r) => r.repoSha ?? "unstamped"))].sort();
     const roots = [...new Set(rows.map((r) => r.repoRoot ?? "unknown"))].sort();
+    const datasetShas = [...new Set(rows.map((r) => r.datasetSha ?? "unstamped"))].sort();
+    const seeds = [...new Set(rows.map((r) => r.seed ?? "unstamped"))];
     const vectorRows = rows.filter((r) => typeof r.vectorCredited === "number");
     const vectorLiveness = vectorRows.length
       ? {
@@ -242,7 +271,14 @@ function main(): void {
 
     report.systems[system] = {
       status: "ok",
-      runTimeProvenance: { repoShas: shas, repoRoots: roots, mixed: shas.length > 1, note: rows[0]?.note ?? null },
+      runTimeProvenance: {
+        repoShas: shas,
+        repoRoots: roots,
+        datasetShas,
+        seeds,
+        mixed: shas.length > 1 || roots.length > 1 || datasetShas.length > 1 || seeds.length > 1,
+        note: rows[0]?.note ?? null,
+      },
       vectorLiveness,
       questionsRun: rows.length,
       questionsScored: scored.length,
@@ -281,7 +317,7 @@ function main(): void {
   lines.push("## Overall, all systems (same harness, same corpora)");
   lines.push("");
   lines.push(
-    `Every row below was scored on the SAME ${subsetPath ? `${subset!.size}-question subset` : "question set"} ` +
+    `Every row below was scored on the SAME ${subsetPath ? `${expectedQuestionIds.length}-question selection` : `${expectedQuestionIds.length}-question set`} ` +
       `with the same metric definitions. Rows from a DIFFERENT tag have a different denominator and must not be ` +
       `combined with these. The retrieval configuration is printed with each system name because "memory-core" ` +
       `alone does not say whether an embedder was used.`,
@@ -296,17 +332,18 @@ function main(): void {
   lines.push("");
 
   // Sanity block: the checks that would catch a broken or leaking harness.
-  const sanity: any = { flags: [] as string[], fatalProvenanceFlags: [] as string[] };
+  const sanity: any = {
+    flags: [] as string[],
+    fatalRunFlags: [] as string[],
+    fatalProvenanceFlags: [] as string[],
+  };
   sanity.staleRowsIgnored = staleRowsIgnored;
   const expectedQuestionCount = expectedQuestionIds.length;
   sanity.expectedQuestionsPerSystem = expectedQuestionCount;
   for (const system of systems) {
-    const actual = raw[system]?.length ?? 0;
-    if (actual !== expectedQuestionCount) {
-      sanity.fatalProvenanceFlags.push(
-        `${system}: ${actual}/${expectedQuestionCount} rows from current SHA ${provenance.repo.sha}`,
-      );
-    }
+    sanity.fatalRunFlags.push(
+      ...systemRunFailures(system, raw[system] ?? [], expectedQuestionIds, expectedRun),
+    );
   }
   if (overallBySystem["random"] && report.systems["random"]) {
     const emp = overallBySystem["random"]!.recallAt[10]!;
@@ -329,9 +366,14 @@ function main(): void {
     sanity.runTimeShas[system] = p.repoShas;
     if (p.mixed) sanity.flags.push(`${system}: MIXED run-time SHAs ${p.repoShas.join(" + ")} - results are spliced across commits, do not report`);
     if (p.repoShas.includes("unstamped")) sanity.flags.push(`${system}: rows without a run-time SHA stamp`);
-    if (p.repoShas.length !== 1 || p.repoShas[0] !== provenance.repo.sha) {
+    if (
+      p.repoShas.length !== 1 || p.repoShas[0] !== expectedRun.repoSha ||
+      p.repoRoots.length !== 1 || p.repoRoots[0] !== expectedRun.repoRoot ||
+      p.datasetShas.length !== 1 || p.datasetShas[0] !== expectedRun.datasetSha ||
+      p.seeds.length !== 1 || p.seeds[0] !== expectedRun.seed
+    ) {
       sanity.fatalProvenanceFlags.push(
-        `${system}: worker SHA ${p.repoShas.join(" + ")} does not match report SHA ${provenance.repo.sha}`,
+        `${system}: worker run identity does not match report run identity`,
       );
     }
   }
@@ -339,7 +381,9 @@ function main(): void {
   sanity.singleShaAcrossSystems = allShas.length === 1;
   if (allShas.length > 1) sanity.flags.push(`systems were run at different SHAs: ${allShas.join(" + ")}`);
   sanity.provenanceOk = sanity.fatalProvenanceFlags.length === 0;
-  sanity.flags.push(...sanity.fatalProvenanceFlags);
+  sanity.fatalRunFlags.push(...sanity.fatalProvenanceFlags);
+  sanity.runOk = sanity.fatalRunFlags.length === 0;
+  sanity.flags.push(...sanity.fatalRunFlags);
 
   // Any system named hybrid must have proven its vector leg ran.
   for (const system of systems) {
@@ -384,8 +428,8 @@ function main(): void {
   }
   lines.push(`- run-time SHA per system (stamped by the worker, not the scorer): ${JSON.stringify(sanity.runTimeShas)}`);
   lines.push(`- single SHA across all systems: ${sanity.singleShaAcrossSystems ? "yes" : "NO"}`);
-  lines.push(`- stale rows from other SHAs ignored: ${JSON.stringify(sanity.staleRowsIgnored)}`);
-  lines.push(`- current-SHA row completeness: ${sanity.provenanceOk ? "PASS" : "FAIL"} (${sanity.expectedQuestionsPerSystem} expected per system)`);
+  lines.push(`- stale rows from other run identities ignored: ${JSON.stringify(sanity.staleRowsIgnored)}`);
+  lines.push(`- current-run row validity: ${sanity.runOk ? "PASS" : "FAIL"} (${sanity.expectedQuestionsPerSystem} expected per system)`);
   for (const system of systems) {
     const v = report.systems[system]?.vectorLiveness;
     if (!v) continue;
@@ -407,7 +451,7 @@ function main(): void {
   fs.writeFileSync(mdPath, `${lines.join("\n")}\n`);
   console.log(lines.join("\n"));
   console.log(`\nwrote ${jsonPath}\nwrote ${mdPath}`);
-  if (!sanity.provenanceOk) process.exitCode = 1;
+  process.exitCode = aggregateExitCode(sanity.fatalRunFlags);
 }
 
 main();

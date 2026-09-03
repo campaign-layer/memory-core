@@ -11,14 +11,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import { buildCorpus, listQuestionIds, loadQuestion, toMaterialized } from "./dataset.js";
-import { MODE_A_DIR, requirePrepared } from "./paths.js";
+import {
+  datasetShaFromManifest, parseNonNegativeInteger, parseSubsetQuestionIds,
+  parseSystemNames, rowMatchesRun, selectQuestionIds, type ModeARunIdentity,
+} from "./integrity.js";
+import { MANIFEST, MODE_A_DIR, requirePrepared } from "./paths.js";
 import { repoShaAtRunTime } from "./provenance.js";
 import {
   ALL_SYSTEMS, buildSystem, RETRIEVAL_DEPTH, type DiagSystem, type SearchDiag,
 } from "./systems.js";
 
 /** Resolved once, here, by the process that produces the rows. */
-const RUN = repoShaAtRunTime();
+const REPO = repoShaAtRunTime();
 
 function arg(name: string, fallback?: string): string {
   const prefix = `--${name}=`;
@@ -32,7 +36,7 @@ function arg(name: string, fallback?: string): string {
   process.exit(2);
 }
 
-function loadDone(file: string): Set<string> {
+function loadDone(file: string, run: ModeARunIdentity): Set<string> {
   const done = new Set<string>();
   if (!fs.existsSync(file)) return done;
   for (const line of fs.readFileSync(file, "utf8").split("\n")) {
@@ -40,9 +44,9 @@ function loadDone(file: string): Set<string> {
     try {
       const row = JSON.parse(line);
       // A report tag names only the aggregate artifact; shard files are shared
-      // across runs. Resume only rows produced by this exact checkout, or a new
-      // commit will silently reuse an older commit's successful results.
-      if (!row.error && row.repoSha === RUN.sha && row.repoRoot === RUN.root) done.add(row.qid);
+      // across runs. Resume only rows produced by this exact code, checkout,
+      // dataset and seed, or the cache can splice incompatible results.
+      if (!row.error && rowMatchesRun(row, run)) done.add(row.qid);
     } catch {
       // A torn final line from a killed process. Ignore it; the qid is redone.
     }
@@ -52,27 +56,34 @@ function loadDone(file: string): Set<string> {
 
 async function main(): Promise<void> {
   requirePrepared();
-  if (RUN.dirty) {
+  if (REPO.dirty) {
     throw new Error("LongMemEval Mode A requires a clean tracked worktree; commit the code before producing rows");
   }
-  const shard = Number(arg("shard"));
-  const shards = Number(arg("shards"));
-  const seed = Number(arg("seed", "1234"));
-  const limit = Number(arg("limit", "0"));
+  const shard = parseNonNegativeInteger(arg("shard"), "shard");
+  const shards = parseNonNegativeInteger(arg("shards"), "shards");
+  const seed = parseNonNegativeInteger(arg("seed", "1234"), "seed");
+  const limit = parseNonNegativeInteger(arg("limit", "0"), "limit");
+  if (shards === 0 || shard >= shards) throw new Error(`invalid shard ${shard} of ${shards}`);
   const subsetPath = arg("subset", "");
-  const systemNames = arg("systems").split(",").filter(Boolean);
+  const systemNames = parseSystemNames(arg("systems"));
+  const manifest = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
+  const run: ModeARunIdentity = {
+    repoSha: REPO.sha,
+    repoRoot: REPO.root,
+    datasetSha: datasetShaFromManifest(manifest),
+    seed,
+  };
 
   const unknown = systemNames.filter((n) => !(ALL_SYSTEMS as readonly string[]).includes(n));
   if (unknown.length) {
     throw new Error(`unknown system(s): ${unknown.join(", ")}\nknown: ${ALL_SYSTEMS.join(", ")}`);
   }
 
-  let allIds = listQuestionIds();
-  if (subsetPath) {
-    const keep = new Set<string>(JSON.parse(fs.readFileSync(subsetPath, "utf8")));
-    allIds = allIds.filter((q) => keep.has(q));
-  }
-  const selected = (limit > 0 ? allIds.slice(0, limit) : allIds).filter((_, i) => i % shards === shard);
+  const subsetIds = subsetPath
+    ? parseSubsetQuestionIds(JSON.parse(fs.readFileSync(subsetPath, "utf8")))
+    : null;
+  const selected = selectQuestionIds(listQuestionIds(), subsetIds, limit)
+    .filter((_, i) => i % shards === shard);
 
   const outFile: Record<string, string> = {};
   const done: Record<string, Set<string>> = {};
@@ -81,7 +92,7 @@ async function main(): Promise<void> {
     const dir = path.join(MODE_A_DIR, name);
     fs.mkdirSync(dir, { recursive: true });
     outFile[name] = path.join(dir, `shard-${shard}.jsonl`);
-    done[name] = loadDone(outFile[name]!);
+    done[name] = loadDone(outFile[name]!, run);
     systems[name] = buildSystem(name, seed);
   }
 
@@ -124,8 +135,10 @@ async function main(): Promise<void> {
           ingestMs: Number((t1 - t0).toFixed(2)),
           searchMs: Number((t2 - t1).toFixed(2)),
           // Provenance stamped by the process that produced this row, not by the scorer.
-          repoSha: RUN.sha,
-          repoRoot: RUN.root,
+          repoSha: run.repoSha,
+          repoRoot: run.repoRoot,
+          datasetSha: run.datasetSha,
+          seed: run.seed,
           note: sys.note,
           // Proof the vector leg ran, for the hybrid systems.
           vectorCredited: diag?.vectorCredited ?? null,
@@ -144,7 +157,8 @@ async function main(): Promise<void> {
           qid, type: corpus.questionType, system: name,
           nCorpus: memories.length, nGold: corpus.goldIds.length, goldIds: corpus.goldIds,
           depth: RETRIEVAL_DEPTH, ranking: [], ingestMs: 0, searchMs: 0,
-          repoSha: RUN.sha, repoRoot: RUN.root,
+          repoSha: run.repoSha, repoRoot: run.repoRoot,
+          datasetSha: run.datasetSha, seed: run.seed,
           error: msg,
         };
       } finally {

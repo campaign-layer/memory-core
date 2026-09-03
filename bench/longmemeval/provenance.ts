@@ -44,7 +44,7 @@ function git(args: string[]): string {
  * Stamping the SHA at scoring time instead of run time is how a neighbouring run
  * got spliced across two commits while its provenance still looked consistent: the
  * checkout moved mid-run and only the final report was stamped. Every result row
- * carries this, and the aggregator refuses to merge rows whose SHAs disagree.
+ * carries this, and the aggregator includes it in the complete run identity.
  */
 export function repoShaAtRunTime(): { sha: string; root: string; dirty: boolean } {
   return {
