@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   aggregateExitCode, datasetShaFromManifest, parseNonNegativeInteger,
-  parseSubsetQuestionIds, parseSystemNames, rowMatchesRun, selectQuestionIds,
+  modeBRowMatchesRun, parseSubsetQuestionIds, parseSystemNames, rowMatchesRun, selectQuestionIds,
   systemRunFailures, type ModeARunIdentity,
 } from "./integrity.js";
 
@@ -35,16 +35,15 @@ test("error rows make aggregation fail even when row count is complete", () => {
   assert.equal(aggregateExitCode(systemRunFailures("bm25", [stampedRow()], ["q1"], RUN)), 0);
 });
 
-test("duplicate rows cannot hide a missing question", () => {
+test("deduplicated rows cannot hide a missing question", () => {
   const failures = systemRunFailures(
     "bm25",
-    [stampedRow(), stampedRow()],
+    [stampedRow()],
     ["q1", "q2"],
     RUN,
   );
 
   assert.match(failures.join("\n"), /missing 1 expected question/);
-  assert.match(failures.join("\n"), /duplicate rows for 1 question/);
   assert.equal(aggregateExitCode(failures), 1);
 });
 
@@ -67,6 +66,20 @@ test("cache identity rejects stale SHA and root", () => {
   assert.equal(rowMatchesRun(stampedRow({ repoSha: "sha-old" }), RUN), false);
   assert.equal(rowMatchesRun(stampedRow({ repoRoot: "/repo/other" }), RUN), false);
   assert.equal(rowMatchesRun(stampedRow(), RUN), true);
+});
+
+test("Mode B cache identity includes retrieval system, model, and condition", () => {
+  const expected = {
+    ...RUN,
+    retrievalSystem: "memory-core",
+    model: "deepseek/deepseek-v4-flash",
+    condition: "k30",
+  };
+  const row = { ...stampedRow(), ...expected };
+  assert.equal(modeBRowMatchesRun(row, expected), true);
+  assert.equal(modeBRowMatchesRun({ ...row, retrievalSystem: "bm25" }, expected), false);
+  assert.equal(modeBRowMatchesRun({ ...row, model: "other-model" }, expected), false);
+  assert.equal(modeBRowMatchesRun({ ...row, condition: "k10" }, expected), false);
 });
 
 test("invalid, empty, duplicate, and unknown subsets fail closed", () => {

@@ -50,9 +50,9 @@ export function repoShaAtRunTime(): { sha: string; root: string; dirty: boolean 
   return {
     sha: git(["rev-parse", "HEAD"]),
     root: REPO_ROOT,
-    // Benchmark outputs and third-party datasets are intentionally untracked.
-    // Only tracked changes mean the executable code differs from HEAD.
-    dirty: git(["status", "--porcelain", "--untracked-files=no"]).length > 0,
+    // Dataset, work, output and dependency trees are already gitignored. Any
+    // remaining untracked file may affect execution and must invalidate a run.
+    dirty: git(["status", "--porcelain"]).length > 0,
   };
 }
 
@@ -66,7 +66,7 @@ export function captureProvenance(datasetFile: string, datasetSha?: string): Pro
       root: REPO_ROOT,
       sha: git(["rev-parse", "HEAD"]),
       branch: git(["rev-parse", "--abbrev-ref", "HEAD"]),
-      dirty: git(["status", "--porcelain", "--untracked-files=no"]).length > 0,
+      dirty: git(["status", "--porcelain"]).length > 0,
     },
     dataset: {
       file: datasetFile,

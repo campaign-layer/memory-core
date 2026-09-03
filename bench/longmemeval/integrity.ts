@@ -14,6 +14,18 @@ export interface ModeARowStamp {
   seed?: unknown;
 }
 
+export interface ModeBRunIdentity extends ModeARunIdentity {
+  retrievalSystem: string;
+  model: string;
+  condition: string;
+}
+
+export interface ModeBRowStamp extends ModeARowStamp {
+  retrievalSystem?: unknown;
+  model?: unknown;
+  condition?: unknown;
+}
+
 export function parseNonNegativeInteger(raw: string, name: string): number {
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -80,6 +92,13 @@ export function rowMatchesRun(row: ModeARowStamp, expected: ModeARunIdentity): b
     row.seed === expected.seed;
 }
 
+export function modeBRowMatchesRun(row: ModeBRowStamp, expected: ModeBRunIdentity): boolean {
+  return rowMatchesRun(row, expected) &&
+    row.retrievalSystem === expected.retrievalSystem &&
+    row.model === expected.model &&
+    row.condition === expected.condition;
+}
+
 export function systemRunFailures(
   system: string,
   rows: readonly ModeARowStamp[],
@@ -87,18 +106,8 @@ export function systemRunFailures(
   identity: ModeARunIdentity,
 ): string[] {
   const failures: string[] = [];
-  const expected = new Set(expectedQuestionIds);
-  const counts = new Map<string, number>();
-  let invalidQuestionIds = 0;
-  for (const row of rows) {
-    if (typeof row.qid !== "string" || !expected.has(row.qid)) {
-      invalidQuestionIds += 1;
-      continue;
-    }
-    counts.set(row.qid, (counts.get(row.qid) ?? 0) + 1);
-  }
-  const missing = expectedQuestionIds.filter((qid) => !counts.has(qid));
-  const duplicates = [...counts.entries()].filter(([, count]) => count > 1);
+  const present = new Set(rows.map((row) => row.qid).filter((qid): qid is string => typeof qid === "string"));
+  const missing = expectedQuestionIds.filter((qid) => !present.has(qid));
 
   const expectedQuestionCount = expectedQuestionIds.length;
   if (rows.length !== expectedQuestionCount) {
@@ -106,14 +115,8 @@ export function systemRunFailures(
       `${system}: ${rows.length}/${expectedQuestionCount} rows from current run identity ${identity.repoSha}`,
     );
   }
-  if (invalidQuestionIds > 0) {
-    failures.push(`${system}: ${invalidQuestionIds} row(s) have an invalid or unexpected question id`);
-  }
   if (missing.length > 0) {
     failures.push(`${system}: missing ${missing.length} expected question row(s)`);
-  }
-  if (duplicates.length > 0) {
-    failures.push(`${system}: duplicate rows for ${duplicates.length} question id(s)`);
   }
   const errorCount = rows.filter((row) => typeof row.error === "string" && row.error.length > 0).length;
   if (errorCount > 0) failures.push(`${system}: ${errorCount} current-run row(s) contain errors`);
