@@ -17,6 +17,9 @@ data/
 bench/results/
 bench/out/
 
+# Local orchestration dashboard state
+.orchestration/
+
 # Model cache for local ONNX embeddings
 .cache/
 .models/

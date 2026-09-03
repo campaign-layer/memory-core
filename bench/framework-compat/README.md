@@ -22,6 +22,12 @@ compatibility.
 Every result is attached to the exact framework version. Never summarize a
 partial matrix as universal compatibility.
 
+Recall assertions parse numbered evidence rows and compare the exact stored
+text. They deliberately ignore the human-readable recall header because that
+header echoes the query. Feedback and forget require their exact success
+receipts, while the REST lifecycle checks independently corroborate ids and
+retirement state.
+
 ## Latest completed canary
 
 The live bench run of frozen commit `38a28067e9d49c00e2f6affeb620f2af6c486ddf` (tree
@@ -45,6 +51,29 @@ semantic ranking quality or autonomous agent task improvement. See
 [`docs/AGENT_EVALUATION.md`](../../docs/AGENT_EVALUATION.md) for the separate L3/O1/O2 plan.
 The terminal bundle is retained on the bench host and is not committed here; this checkout
 contains the harness needed to reproduce a fresh run, not the completed run's proof by itself.
+
+## Latest completed 24-hour run
+
+The frozen `e730f15bd783e2ee8df0a8cea574352ac4e47568` primary completed 24 hours on
+2026-09-01. Its underlying workload passed all persistence, isolation, concurrency,
+throughput, audit, resource, and four injected-fault gates: 242,651 requests, 34,785
+acknowledged writes, five audits covering 67,886 records, and zero acknowledged loss.
+The enclosing campaign nevertheless finalized `FAILED`, `qualified:false`, as intended,
+because every periodic L2 batch at hours 5, 10, 15, and 20 failed.
+
+Post-run reconstruction separated the failures:
+
+- 25 `build_context` checks genuinely omitted their exact new memory at `maxChars=1000`.
+  All 25 targets were present in the provider candidate set at final rank 3, but two verbose
+  higher-prior rows consumed the character budget first. The workload's 43,096 context calls
+  at `maxChars=2000` all retained their required markers.
+- Three post-forget failures were invalid substring assertions against a recall header that
+  echoed the query; they did not demonstrate a lifecycle or persistence leak.
+
+The current source reserves room for direct query-containing evidence already returned by
+the provider and hardens the JS/Python probes against header self-matches. Retrospective
+reconstruction says the selection change would include all 25 failed targets, but that is not
+a replacement for a fresh canary and 24-hour qualification on the patched commit.
 
 ## Covered deterministic hosts
 

@@ -11,6 +11,10 @@ import {
   exerciseFramework,
   fail,
   principalFor,
+  recalledExactMemory,
+  recalledMemoryId,
+  requireToolNoError,
+  requireToolSuccess,
 } from "./probe-lib.mjs";
 
 class RecordingScriptedResponsesModel extends OpenAIResponsesModel {
@@ -47,6 +51,7 @@ try {
   )];
   const principal = principalFor("openai-agents");
   const marker = `agents-runner-${Date.now()}-${randomUUID()}`;
+  const runnerMemoryText = `OpenAI Agents runner retained ${marker}`;
   const backend = createRemoteBackend(new MemoryCoreClient({
     baseUrl: process.env.MC_BASE_URL,
     apiKey: principal.key,
@@ -91,7 +96,7 @@ try {
   }));
   const model = new RecordingScriptedResponsesModel([
     [functionCall("remember", {
-      text: `OpenAI Agents runner retained ${marker}`,
+      text: runnerMemoryText,
       type: "tool_outcome",
       scope: "actor",
     }, { callId: "remember-call" })],
@@ -124,8 +129,9 @@ try {
     if (!recallOutputItem) {
       throw new Error("the Agents runner did not produce a recall function_call_output item");
     }
-    if (!(JSON.stringify(recallOutputItem.output) || "").includes(marker)) {
-      throw new Error("the recall function_call_output did not contain the recalled marker");
+    requireToolNoError(recallOutputItem.output, "runner recall function_call_output");
+    if (!recalledExactMemory(recallOutputItem.output, runnerMemoryText)) {
+      throw new Error("the recall function_call_output did not contain the exact remembered evidence row");
     }
   } catch (error) {
     runnerError = error;
@@ -133,17 +139,22 @@ try {
   } finally {
     try {
       if (!runnerMemoryId) {
-        const recalled = String(await byName.get("recall").execute({ query: marker, limit: 5 }));
-        runnerMemoryId = /id=(\S+)/.exec(recalled)?.[1];
+        const recalled = await byName.get("recall").execute({ query: marker, limit: 5 });
+        requireToolNoError(recalled, "runner cleanup recall");
+        runnerMemoryId = recalledMemoryId(recalled, runnerMemoryText);
       }
       if (!runnerMemoryId) {
         if (!runnerError) throw new Error("runner memory could not be identified for cleanup");
       } else {
-        const forgotten = String(await byName.get("forget").execute({
+        const forgotten = await byName.get("forget").execute({
           memoryId: runnerMemoryId,
           reason: "compatibility probe cleanup",
-        }));
-        if (/failed|error/i.test(forgotten)) throw new Error("runner memory cleanup failed");
+        });
+        requireToolSuccess(
+          forgotten,
+          "runner memory cleanup",
+          `Forgot ${runnerMemoryId}. It will not be recalled again.`,
+        );
         runnerCleanupCompleted = true;
       }
     } catch (cleanupError) {

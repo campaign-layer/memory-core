@@ -137,6 +137,21 @@ test("dispatch build_context returns a promptable block", async () => {
   assert.ok(block.text.length <= 900 + 200);
 });
 
+test("build_context reports matching evidence omitted by the budget instead of claiming no memory exists", async () => {
+  const { ctx } = newContext();
+  const query = "oversized tool context marker";
+  await dispatch("remember", {
+    text: `${query} ${"complete evidence must not be truncated ".repeat(20)}`,
+    type: "tool_outcome",
+  }, ctx);
+
+  const result = await dispatch("build_context", { query, maxChars: 300 }, ctx);
+  assert.equal(result.ok, true);
+  assert.match(result.text, /Stored memories matched, but no complete evidence line fit/);
+  assert.doesNotMatch(result.text, /No stored memory/);
+  assert.equal((result.data as { omittedCandidateCount: number }).omittedCandidateCount, 1);
+});
+
 test("dispatch feedback, forget and supersede close the correction loop", async () => {
   const { ctx } = newContext();
   const stored = await dispatch("remember", { text: "Lives in Berlin", type: "fact" }, ctx);

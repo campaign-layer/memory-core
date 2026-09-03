@@ -177,6 +177,9 @@ export interface ContextBuildResult {
   }>;
   contextText: string;
   totalMemories: number;
+  /** Verified search/profile candidates considered but not emitted, usually because
+   *  maxItems or maxChars could not admit a complete evidence line. */
+  omittedCandidateCount?: number;
   processingTime: number;
   actorProfile?: string;
 }

@@ -654,11 +654,15 @@ async function buildContext(
     budget: { maxItems: args.maxItems, maxChars: args.maxChars },
   });
   const text = result.contextText?.trim();
+  const emptyText = (result.omittedCandidateCount ?? 0) > 0
+    ? "Stored memories matched, but no complete evidence line fit this context budget. Increase maxChars or narrow the query."
+    : "No stored memory for this actor yet.";
   return {
     ok: true,
-    text: text && text.length > 0 ? text : "No stored memory for this actor yet.",
+    text: text && text.length > 0 ? text : emptyText,
     data: {
       totalMemories: result.totalMemories,
+      omittedCandidateCount: result.omittedCandidateCount ?? 0,
       ids: result.selectedMemories.map((memory) => memory.id),
       profileIds: (result.profileMemories ?? []).map((memory) => memory.id),
     },

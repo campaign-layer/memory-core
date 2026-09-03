@@ -195,9 +195,67 @@ harness**, and that is the single most important caveat on the page:
 > **Every harness is in this repository.** The synthetic suite lives in
 > [`bench/`](bench/README.md); the LongMemEval and LoCoMo harnesses — including the mem0
 > comparison and the QA reader/judge — live in [`bench/longmemeval/`](bench/longmemeval/) and
-> [`bench/locomo/`](bench/locomo/), with the result artifacts behind every table committed
-> alongside them. The datasets themselves are third-party and are not vendored; each harness
-> has a `DATA.md` with the download source and expected checksum.
+> [`bench/locomo/`](bench/locomo/). The public-dataset artifacts behind tables 2 and 3 are
+> committed alongside their harnesses. The historical synthetic/supermemory raw outputs behind
+> table 1 are not committed, so that comparison is lower-confidence until a clean credentialed
+> rerun is checked in. The third-party datasets are not vendored; each harness has a `DATA.md`
+> with its download source and expected checksum.
+
+### Defensible comparisons with memory providers
+
+These are the only direct provider comparisons currently supported by our harness. “Same
+harness” means the systems received the same corpus and queries and were scored with the same
+metric implementation. It does **not** mean this is the provider's preferred ingestion policy
+or published protocol.
+
+| comparison | fixed protocol | Memory Core | external provider | evidence and honest result |
+|---|---|---:|---:|---|
+| LoCoMo retrieval | 5,882 turns; n = 1,531 answerable; depth 30 | hybrid R@5 **.620**, R@10 **.709**, MRR **.524** | mem0 OSS 2.0.14 R@5 **.635**, R@10 **.694**, MRR **.534** | mem0 wins early ranking; Memory Core wins retrieval depth. [`mode_a.json`](bench/locomo/results/mode_a.json), [artifact index](bench/locomo/results/README.md) |
+| LoCoMo QA | same reader/judge; k = 30; matched n = 233 | hybrid **.451** | mem0 OSS **.476** | mem0 wins; the oracle is only .485, so reader error compresses the gap. [`oracle_matched.txt`](bench/locomo/results/oracle_matched.txt), [`mode_b.txt`](bench/locomo/results/mode_b.txt) |
+| Internal synthetic retrieval | 527 memories; n = 44 answerable; depth 100 | hybrid R@5 **.830**, R@10 **.955**, MRR **.688** | supermemory R@5 **.807**, R@10 **.898**, MRR **.662** | Memory Core wins overall, but supermemory beats Memory Core BM25-only at R@5/MRR; self-authored dataset and separate invocations make this provisional. [protocol and full breakdown](docs/BENCHMARKS.md), [fixture](bench/dataset/generated/small-seed1337.json) |
+
+There is no same-harness score yet for Zep/Graphiti, Letta, LangMem, or supermemory on either
+public dataset. Those are **not measured**, not losses or wins. LongMemEval currently compares
+Memory Core with BM25/random controls only; its committed evidence is
+[`modeA-fast.json`](bench/longmemeval/results/modeA-fast.json) and the
+[`artifact index`](bench/longmemeval/results/README.md).
+
+### Vendor-published reference numbers — not a head-to-head comparison
+
+The following numbers explain what competitors publish and help define the target protocol.
+They are deliberately outside the tables above: metric type, ingestion unit, retrieval depth,
+context budget, reader/judge model, and proprietary product path differ. We compute **no delta
+against Memory Core** from these rows. References captured at 2026-09-02T19:03:03Z (UTC) in
+[`bench/provider-reference.json`](bench/provider-reference.json).
+
+| vendor report | vendor-published result | material protocol differences |
+|---|---|---|
+| [Mem0 evaluation](https://docs.mem0.ai/core-concepts/memory-evaluation) | LoCoMo **92.5** accuracy; LongMemEval **94.4** accuracy | managed platform with proprietary optimizations; top-200 retrieval; mean context 6,956 / 6,787 tokens; vendor states ±1 point judge variation |
+| [Supermemory LongMemEval-S](https://supermemory.ai/research/longmembench/) | **95%** overall Recall@15 with aggregation | session-level ingestion, GPT-4o answering/judging, about 720 mean context tokens; different metric and k from our LongMemEval retrieval table |
+| [Zep research](https://www.getzep.com/research/) | LoCoMo **94.7%** accuracy; LongMemEval **90.2%** accuracy | GPT-5.4 reader/judge; multi-scope retrieval; median context 5,760 / 4,408 tokens and p95 retrieval 155 / 162 ms |
+
+A publishable provider leaderboard needs one frozen commit and dataset checksum; pinned provider
+versions; identical ingestion units, queries, retrieval/context budgets, reader, judge, and
+prompts; BM25/random controls; retrieval, QA, update, abstention, latency, token, and dollar-cost
+metrics; and raw per-question artifacts with denominators and confidence intervals. Until all
+rows satisfy that contract, the same-harness table above is the comparison claim and the vendor
+table is context only.
+
+Reproduce or inspect the current evidence:
+
+The TUI's non-comparable vendor bars are sourced from the dated, reviewable
+[`bench/provider-reference.json`](bench/provider-reference.json) manifest rather than embedded
+display constants.
+
+```bash
+npm run bench:small
+npm run bench:tui
+
+# after downloading the datasets per each DATA.md
+(cd bench/longmemeval && ./run-modeA.sh)
+(cd bench/locomo && ./mode_a.sh --with-hybrid)              # local systems
+(cd bench/locomo && ./mode_a.sh --with-mem0)                # hours + API cost
+```
 
 ### 1. Synthetic suite (`bench/`) — our dataset, weakest evidence
 
@@ -596,6 +654,12 @@ The current exact-version compatibility evidence is:
 | L0: isolated configuration acceptance/readback | Claude Code, Codex CLI |
 | L3: autonomous model selection with retained tool trace | **Not yet measured for any host** |
 
+Those L2 rows are exact-version deterministic execution evidence, not a current production
+qualification. The completed `e730f15` 24-hour workload passed its storage/fault gates but the
+campaign failed its periodic L2 context gates under corpus growth. This checkout contains the
+resulting context-selection and false-positive probe fixes; a fresh canary and 24-hour rerun
+remain required before claiming the patched revision is qualified.
+
 One Postgres-backed service can support many agents. Give each agent a distinct principal key
 and `appId`; share tenant/space/actor for one person's actor memory, or share tenant/space and
 write `workspace` memories for a team of distinct role actors. App and thread scopes remain
@@ -637,6 +701,7 @@ npm test                 # node:test — all pass; 1 skipped (ONNX, opt-in)
 npm run test:pg          # Postgres provider tests; needs a database
 npm run verify:mcp       # MCP server end to end over stdio
 npm run mcp              # run the MCP server
+npm run dashboard:agents -- --watch=2  # local parallel-work status; state stays Git-ignored
 
 npm run bench            # tsx bench/run.ts
 npm run bench:small      # --size=small -> bench/out/baseline-small.json

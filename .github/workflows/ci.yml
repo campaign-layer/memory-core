@@ -90,6 +90,8 @@ jobs:
         run: |
           for file in bench/framework-compat/*.mjs; do node --check "$file"; done
           PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python3 -m py_compile bench/framework-compat/probe-python.py
+          node bench/framework-compat/probe-lib.mjs --self-test
+          python3 bench/framework-compat/probe-python.py --self-test
 
       - name: Exercise fail-closed run configuration generation
         run: >-
