@@ -77,6 +77,29 @@ export function selectQuestionIds(
   return selected;
 }
 
+export function selectCompleteRunRows<T extends ModeARowStamp>(
+  label: string,
+  rows: readonly T[],
+  manifestQuestionIds: readonly string[],
+  limit: number,
+  identity: ModeARunIdentity,
+): { questionIds: string[]; rows: T[]; failures: string[] } {
+  const questionIds = selectQuestionIds(manifestQuestionIds, null, limit);
+  const expected = new Set(questionIds);
+  const selectedRows = rows.filter(
+    (row) => typeof row.qid === "string" && expected.has(row.qid) && rowMatchesRun(row, identity),
+  );
+  return {
+    questionIds,
+    rows: selectedRows,
+    failures: systemRunFailures(label, selectedRows, questionIds, identity),
+  };
+}
+
+export function requireNonEmptyQuestionSelection(ids: readonly string[], label: string): void {
+  if (ids.length === 0) throw new Error(`${label} question selection is empty`);
+}
+
 export function datasetShaFromManifest(manifest: any): string {
   const sha = manifest?.provenance?.dataset?.sha256;
   if (typeof sha !== "string" || sha.length === 0) {

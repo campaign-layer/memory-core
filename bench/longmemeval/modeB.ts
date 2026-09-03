@@ -25,7 +25,8 @@ import path from "node:path";
 import { buildCorpus, loadQuestion, type LmeQuestion } from "./dataset.js";
 import {
   aggregateExitCode, datasetShaFromManifest, modeBRowMatchesRun,
-  parseNonNegativeInteger, rowMatchesRun, systemRunFailures,
+  parseNonNegativeInteger, requireNonEmptyQuestionSelection, rowMatchesRun,
+  selectCompleteRunRows, systemRunFailures,
   type ModeARunIdentity, type ModeBRunIdentity,
 } from "./integrity.js";
 import {
@@ -293,15 +294,24 @@ async function main(): Promise<void> {
   };
   const loadedModeA = readModeA(RETRIEVAL_SYSTEM, modeARun);
   const modeA = loadedModeA.rows;
-  const modeAErrors = [...modeA.values()].filter((row) => row.error);
-  if (modeAErrors.length > 0) {
-    throw new Error(`Mode A has ${modeAErrors.length} errored current-run row(s); rerun Mode A before spending on Mode B`);
+  const manifestQuestionIds: string[] = manifest.perQuestion.map((question: any) => question.questionId);
+  const modeAInput = selectCompleteRunRows(
+    `Mode A ${RETRIEVAL_SYSTEM}`,
+    [...modeA.values()],
+    manifestQuestionIds,
+    limit,
+    modeARun,
+  );
+  if (modeAInput.failures.length > 0) {
+    throw new Error(
+      `Mode A input is incomplete or invalid; rerun Mode A before spending on Mode B:\n` +
+        modeAInput.failures.join("\n"),
+    );
   }
   const apiKey = loadApiKey();
   console.log(`retrieval system: ${RETRIEVAL_SYSTEM} — ${retrievalConfigLabel(RETRIEVAL_SYSTEM)}`);
 
-  let qids = [...modeA.keys()].sort();
-  if (limit > 0) qids = qids.slice(0, limit);
+  const qids = modeAInput.questionIds;
   const typeOf = new Map([...modeA.values()].map((r) => [r.qid, r.type]));
   const nGoldOf = new Map([...modeA.values()].map((r) => [r.qid, r.nGold]));
   const isAbstention = (qid: string) => (nGoldOf.get(qid) ?? 0) === 0;
@@ -318,6 +328,7 @@ async function main(): Promise<void> {
     const target = condition === "oracle"
       ? (limit > 0 ? answerable : stratifiedSubsample(answerable, typeOf, oracleN))
       : qids;
+    requireNonEmptyQuestionSelection(target, `Mode B ${condition}`);
     targetsByCondition.set(condition, target);
     const modeBRun: ModeBRunIdentity = {
       ...modeARun,

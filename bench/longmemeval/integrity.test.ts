@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   aggregateExitCode, datasetShaFromManifest, parseNonNegativeInteger,
   modeBRowMatchesRun, parseSubsetQuestionIds, parseSystemNames, rowMatchesRun, selectQuestionIds,
-  systemRunFailures, type ModeARunIdentity,
+  requireNonEmptyQuestionSelection, selectCompleteRunRows, systemRunFailures, type ModeARunIdentity,
 } from "./integrity.js";
 
 const RUN: ModeARunIdentity = {
@@ -80,6 +80,24 @@ test("Mode B cache identity includes retrieval system, model, and condition", ()
   assert.equal(modeBRowMatchesRun({ ...row, retrievalSystem: "bm25" }, expected), false);
   assert.equal(modeBRowMatchesRun({ ...row, model: "other-model" }, expected), false);
   assert.equal(modeBRowMatchesRun({ ...row, condition: "k10" }, expected), false);
+});
+
+test("Mode B input selection cannot shift past a missing Mode A row", () => {
+  const selected = selectCompleteRunRows(
+    "Mode A input",
+    [stampedRow(), stampedRow({ qid: "q3" })],
+    ["q3", "q2", "q1"],
+    2,
+    RUN,
+  );
+  assert.deepEqual(selected.questionIds, ["q1", "q2"]);
+  assert.deepEqual(selected.rows.map((row) => row.qid), ["q1"]);
+  assert.match(selected.failures.join("\n"), /missing 1 expected question/);
+});
+
+test("an empty per-condition question selection fails closed", () => {
+  assert.throws(() => requireNonEmptyQuestionSelection([], "Mode B oracle"), /selection is empty/);
+  assert.doesNotThrow(() => requireNonEmptyQuestionSelection(["q1"], "Mode B oracle"));
 });
 
 test("invalid, empty, duplicate, and unknown subsets fail closed", () => {
