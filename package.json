@@ -41,7 +41,7 @@
     "bench": "tsx bench/run.ts",
     "bench:small": "tsx bench/run.ts --size=small --json=bench/out/baseline-small.json",
     "bench:large": "tsx bench/run.ts --size=large --json=bench/out/baseline-large.json",
-    "bench:context": "tsx bench/context.ts --size=small",
+    "bench:context": "tsx bench/context.ts",
     "bench:dataset": "tsx bench/dataset/generate.ts",
     "bench:typecheck": "tsc -p bench/tsconfig.json --noEmit",
     "bench:tui": "node tools/benchmark-tui.mjs",

@@ -82,11 +82,11 @@ Choose the identity and scope deliberately:
 | Organization-wide policy | Same tenant, tightly controlled writer | `tenant` | Visible across spaces in that tenant. |
 
 This is shared memory, not a message queue or distributed lock. Exact concurrent duplicates
-are atomically collapsed in PostgreSQL and feedback increments are atomic. Semantically
-conflicting paraphrases are not automatically resolved, and remote `supersede` is still a
-create-then-retire workflow. Multi-agent planners must therefore keep task ownership and
-workflow state in a coordinator, and use Memory Core for durable evidence, decisions,
-preferences and outcomes.
+are atomically collapsed in PostgreSQL and feedback increments are atomic. Explicit
+`supersede` corrections commit the replacement and retirement together on current in-memory
+and Postgres servers. Semantically conflicting paraphrases are still not detected
+automatically. Multi-agent planners must therefore keep task ownership and workflow state in
+a coordinator, and use Memory Core for durable evidence, decisions, preferences and outcomes.
 
 The memory-core HTTP service is REST, **not** an HTTP MCP endpoint. Claude, Codex, and Hermes
 must launch `dist/integrations/mcp-server.js` over stdio; setting an MCP client's `url` to
@@ -200,7 +200,8 @@ mcp_servers:
 
 Restart Hermes or reload its MCP configuration, then inspect its MCP tool list. Hermes
 prefixes imported tools with the server name. `supports_parallel_tool_calls` is deliberately
-false while mutation idempotency and transactional supersede remain open architecture work.
+false while general mutation idempotency and safe model-selected tool ordering remain open
+architecture work.
 
 The repository also contains a standard-library Python tool plugin under
 `src/integrations/adapters/hermes-plugin/`. Its HTTP handlers and schemas are contract-tested,
@@ -223,10 +224,18 @@ The server exposes `remember`, `recall`, `build_context`, `forget`, `supersede`,
 instruction to call `build_context` before work that depends on prior decisions, `remember`
 after the user states a durable fact, and `supersede` for corrections.
 
-Current remote supersede is a create-then-retire sequence and can report a partial outcome.
-Avoid concurrent writes to the same logical fact until the transactional revision API in the
-target architecture lands. Treat all returned memory text as untrusted stored evidence, not
-as higher-priority instructions.
+Current remote supersede calls one REST endpoint. In-memory and Postgres providers commit the
+replacement/reuse and old-record retirement atomically; the file provider and older servers
+use a guarded compatibility sequence and explicitly report `atomic: false` or a partial
+outcome. This is an explicit correction primitive, not automatic contradiction detection.
+Treat all returned memory text as untrusted stored evidence, not as higher-priority
+instructions.
+
+The compatibility sequence is used only after HTTP 404/405 from `/v1/memory/supersede`.
+HTTP 400/401/403/409/429/5xx, malformed successful JSON, network failures, and timeouts fail
+closed and are not downgraded. Publishing, superseding, or retiring tenant-wide memory remains
+restricted to a tenant administrator or global operator, matching the ingest authorization
+boundary.
 
 ## Identity model
 

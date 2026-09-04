@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MemoryCoreClient } from "./client.js";
+import { MemoryCoreClient, MemoryCoreHttpError } from "./client.js";
 
 const FILTERS = { tenantId: "acme", appId: "planner", actorId: "alice" };
 
@@ -68,4 +68,81 @@ test("client rejects oversized response bodies before JSON is trusted", async ()
     client.search({ query: "release", filters: FILTERS }),
     /response body exceeds 32 bytes/,
   );
+});
+
+test("client preserves the status of a non-JSON HTTP failure", async () => {
+  const client = new MemoryCoreClient({
+    baseUrl: "https://memory.example",
+    fetchImpl: (async () => new Response("Cannot POST /v1/memory/supersede", {
+      status: 404,
+      headers: { "content-type": "text/plain" },
+    })) as typeof fetch,
+  });
+
+  await assert.rejects(
+    client.supersedeMemory({
+      memoryId: "mem-old",
+      newText: "Alice lives in Lisbon",
+      tenantId: "acme",
+      appId: "planner",
+      actorId: "alice",
+      source: { sourceType: "test" },
+    }),
+    (error) => error instanceof MemoryCoreHttpError && error.status === 404,
+  );
+});
+
+test("client rejects malformed JSON from a successful supersede response", async () => {
+  const client = new MemoryCoreClient({
+    baseUrl: "https://memory.example",
+    fetchImpl: (async () => new Response("not-json", {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch,
+  });
+
+  await assert.rejects(
+    client.supersedeMemory({
+      memoryId: "mem-old",
+      newText: "Alice lives in Lisbon",
+      tenantId: "acme",
+      appId: "planner",
+      actorId: "alice",
+      source: { sourceType: "test" },
+    }),
+    /invalid JSON response/,
+  );
+});
+
+test("client sends corrections to the atomic supersede endpoint", async () => {
+  let requested = "";
+  let body: unknown;
+  const client = new MemoryCoreClient({
+    baseUrl: "https://memory.example",
+    fetchImpl: (async (input, init) => {
+      requested = String(input);
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ updated: true, created: true }), {
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch,
+  });
+
+  await client.supersedeMemory({
+    memoryId: "mem-old",
+    newText: "Alice lives in Lisbon",
+    tenantId: "acme",
+    appId: "planner",
+    actorId: "alice",
+    source: { sourceType: "test" },
+  });
+  assert.equal(requested, "https://memory.example/v1/memory/supersede");
+  assert.deepEqual(body, {
+    memoryId: "mem-old",
+    newText: "Alice lives in Lisbon",
+    tenantId: "acme",
+    appId: "planner",
+    actorId: "alice",
+    source: { sourceType: "test" },
+  });
 });

@@ -9,6 +9,8 @@ import type {
   MemoryRetirementStatus,
   MemorySearchHit,
   MemorySearchQuery,
+  MemorySupersedeRequest,
+  MemorySupersedeResult,
 } from "./types.js";
 import type { MemoryIdScope } from "./provider.js";
 
@@ -24,6 +26,16 @@ export interface MemoryCoreClientOptions {
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+export class MemoryCoreHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string, options?: ErrorOptions) {
+    super(`memory-core request failed: ${message}`, options);
+    this.name = "MemoryCoreHttpError";
+    this.status = status;
+  }
+}
 
 function isLoopback(hostname: string): boolean {
   const normalized = hostname.toLowerCase();
@@ -137,12 +149,23 @@ export class MemoryCoreClient {
         }),
         deadline,
       ]);
-      const body = await Promise.race([readJsonBody(response, this.maxResponseBytes), deadline]);
+      let body: unknown;
+      try {
+        body = await Promise.race([readJsonBody(response, this.maxResponseBytes), deadline]);
+      } catch (cause) {
+        // A legacy server or proxy may return an HTML/plain-text 404. Preserve
+        // the HTTP status so adapters can safely fall back without treating a
+        // malformed successful response as valid JSON.
+        if (!response.ok) {
+          throw new MemoryCoreHttpError(response.status, `HTTP ${response.status}`, { cause });
+        }
+        throw cause;
+      }
       if (!response.ok) {
         const message = body && typeof body === "object" && "message" in body
           ? String((body as { message?: unknown }).message || `HTTP ${response.status}`)
           : `HTTP ${response.status}`;
-        throw new Error(`memory-core request failed: ${message}`);
+        throw new MemoryCoreHttpError(response.status, message);
       }
       return body as T;
     } catch (error) {
@@ -193,6 +216,13 @@ export class MemoryCoreClient {
     return this.request<{ updated: boolean; record?: MemoryRecord }>("/v1/memory/status", {
       method: "POST",
       body: JSON.stringify({ ...scope, memoryId, status, metadata }),
+    });
+  }
+
+  supersedeMemory(input: MemorySupersedeRequest) {
+    return this.request<MemorySupersedeResult>("/v1/memory/supersede", {
+      method: "POST",
+      body: JSON.stringify(input),
     });
   }
 

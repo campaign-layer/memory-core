@@ -42,6 +42,19 @@ export function normalizeKey(text: string): string {
   return normalizeText(text).toLowerCase();
 }
 
+/** Accepts both the current history array and the scalar reverse link written
+ * by older releases. Callers append only service-generated entries. */
+export function supersessionHistoryFrom(metadata: Record<string, unknown>): unknown[] {
+  if (Array.isArray(metadata.supersessionHistory)) return metadata.supersessionHistory;
+  if (typeof metadata.supersedes === "string") {
+    return [{
+      memoryId: metadata.supersedes,
+      reason: typeof metadata.supersedeReason === "string" ? metadata.supersedeReason : null,
+    }];
+  }
+  return [];
+}
+
 export function tokenize(text: string): string[] {
   return normalizeKey(text)
     .replace(/[^a-z0-9\s]/g, " ")

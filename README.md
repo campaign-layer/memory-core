@@ -39,8 +39,9 @@ include the cases where we lose. Every number below names the command that produ
   [Where we lose](#where-we-lose) until there is a number for it.
 - **No automatic supersession.** Duplicate detection is exact normalized-text equality.
   "I live in Lisbon" and "I moved to Berlin" both persist as `active` and both stay
-  retrievable. Supersession exists only through an explicit lifecycle call (the MCP/Hermes
-  `supersede` tool or scoped REST status API); there is no automatic Resolver yet.
+  retrievable unless the caller explicitly corrects the old memory. The MCP/Hermes
+  `supersede` tool and `POST /v1/memory/supersede` perform that explicit correction atomically
+  on in-memory and Postgres providers; there is no automatic Resolver yet.
 - **No multi-hop, and reranking is opt-in.** `MEMORY_RERANKER=voyage` applies a hosted
   cross-encoder after broad provider recall; the default remains provider-native ranking.
   MMR is still unwired because the measured context set has almost no near-duplicate pairs.
@@ -617,7 +618,12 @@ Every route below was exercised against a running server before publishing. Ther
 | `GET` | `/v1/memory/profile/:tenantId/:appId/:actorId?spaceId=&threadId=` | `{tenantId, appId, actorId, byType, summary, count}` |
 | `POST` | `/v1/memory/feedback` | `{updated}` — signal is `selected` \| `positive` \| `negative` |
 | `POST` | `/v1/memory/status` | `{updated, record?}` — scoped one-way retirement to `superseded` or `archived` |
+| `POST` | `/v1/memory/supersede` | `{updated, atomic, previous?, replacement?, created?, partial?}` — explicit correction; atomic on in-memory/Postgres |
 | `POST` | `/v1/memory/compact` | `{archivedExpired, archivedSuperseded}`; requires a global operator key when auth is enabled |
+
+Remote SDKs fall back to the legacy create→retire sequence only when the supersede route returns
+HTTP 404/405. Validation, authorization, rate-limit, conflict and server errors, malformed 2xx
+JSON, network failures, and timeouts fail closed instead of silently becoming non-atomic writes.
 
 Validation rules that bite most often (zod, `src/http.ts`):
 
@@ -629,6 +635,13 @@ Validation rules that bite most often (zod, `src/http.ts`):
   callers.
 - Feedback requires `tenantId`, `appId`, and `actorId`; include `spaceId` and
   `accessThreadId` when addressing shared-space or thread-scoped memory.
+- Supersede requires the same identity fields, the old `memoryId`, corrected `newText`, and a
+  source. A new replacement preserves the old memory's type, visibility coordinates, and decay
+  policy. If an exact active replacement already exists, that canonical row keeps its producer
+  coordinates while adopting the corrected record's decay policy; `created: false` makes this
+  case explicit and `supersessionHistory` retains every linked old id/reason.
+- Principal credentials cannot use supersede to publish tenant-scoped text; as with ingest, only
+  a tenant administrator or global operator can author or retire tenant-wide memory.
 - `search.limit` ≤ 100; provider `minScore` and independent `rerankerMinScore` are 0–1.
   `budget.maxItems` is 1–30 and
   `budget.maxChars` is 300–20000.

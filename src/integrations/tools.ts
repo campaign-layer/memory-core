@@ -1,7 +1,8 @@
 import { z } from "zod";
+import { normalizeKey } from "../utils.js";
 import type { MemoryCoreService } from "../service.js";
 import type { MemoryIdScope, MemoryProvider } from "../provider.js";
-import type { MemoryCoreClient } from "../client.js";
+import { MemoryCoreHttpError, type MemoryCoreClient } from "../client.js";
 import type {
   ContextBuildRequest,
   ContextBuildResult,
@@ -12,6 +13,8 @@ import type {
   MemoryScope,
   MemorySearchHit,
   MemorySearchQuery,
+  MemorySupersedeRequest,
+  MemorySupersedeResult,
   MemoryType,
 } from "../types.js";
 
@@ -96,7 +99,7 @@ export const forgetShape = {
 
 export const supersedeShape = {
   memoryId: z.string().min(1).describe("id of the outdated memory, from recall."),
-  newText: z.string().min(4).max(1000).describe("The current value, stated so it stands alone."),
+  newText: z.string().trim().min(4).max(1000).describe("The current value, stated so it stands alone."),
   reason: z.string().max(200).nullish().describe("What changed. Short. Omit or send null when unknown."),
 };
 
@@ -181,7 +184,7 @@ export const MEMORY_TOOLS = [
     false,
     supersedeShape,
     [
-      "Replace an outdated memory with its current value using a guarded multi-step flow: the replacement is stored, then the old memory is retired. A partial result is reported if retirement races or fails.",
+      "Replace an outdated memory with its current value. Current in-memory and Postgres backends commit the replacement and retirement atomically; legacy backends report partial/non-atomic outcomes explicitly.",
       "Use when a fact changed rather than was never true - moved city, switched framework, new title, revised deadline.",
       "Needs the old memory id from recall.",
     ].join(" "),
@@ -363,6 +366,8 @@ export interface MemoryBackend {
     patch: Record<string, unknown> | undefined,
     scope: MemoryIdScope,
   ): Promise<boolean>;
+  /** Atomic on current embedded/Postgres and current remote backends. */
+  supersede?(input: MemorySupersedeRequest): Promise<MemorySupersedeResult>;
   /** Releases embedded provider resources during host shutdown. */
   close?(): void | Promise<void>;
 }
@@ -392,12 +397,13 @@ export function createEmbeddedBackend(
     async retire(memoryId, status, patch, scope) {
       return (await service.retireMemory(memoryId, status, patch, scope)).updated;
     },
+    supersede: (input) => service.supersedeMemory(input),
     close: () => provider?.close?.(),
   };
 }
 
 type RemoteClient = Pick<MemoryCoreClient, "ingest" | "search" | "buildContext" | "applyFeedback"> &
-  Partial<Pick<MemoryCoreClient, "getMemory" | "retireMemory">>;
+  Partial<Pick<MemoryCoreClient, "getMemory" | "retireMemory" | "supersedeMemory">>;
 
 /**
  * Talks to a running memory-core HTTP service. Current clients expose scoped
@@ -422,14 +428,18 @@ export function createRemoteBackend(client: RemoteClient): MemoryBackend {
     applyFeedback: (input) => client.applyFeedback(input),
   };
 
+  if (client.supersedeMemory) {
+    backend.supersede = (input) => client.supersedeMemory!(input);
+  }
   if (!client.getMemory || !client.retireMemory) return backend;
-  return {
+  const current: MemoryBackend = {
     ...backend,
     getById: (memoryId, scope) => client.getMemory!(memoryId, scope),
     async retire(memoryId, status, patch, scope) {
       return (await client.retireMemory!(memoryId, status, patch, scope)).updated;
     },
   };
+  return current;
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +595,27 @@ type RecallArgs = z.infer<z.ZodObject<typeof recallShape>>;
 type BuildContextArgs = z.infer<z.ZodObject<typeof buildContextShape>>;
 type ForgetArgs = z.infer<z.ZodObject<typeof forgetShape>>;
 type SupersedeArgs = z.infer<z.ZodObject<typeof supersedeShape>>;
+
+function isMissingRouteError(error: unknown): boolean {
+  return error instanceof MemoryCoreHttpError && (error.status === 404 || error.status === 405);
+}
+
+const SUPERSEDE_FAILURES = new Set<NonNullable<MemorySupersedeResult["failure"]>>([
+  "not_found",
+  "identical",
+  "raced",
+  "provider_error",
+]);
+
+function isSupersedeResponseEnvelope(value: unknown): value is MemorySupersedeResult {
+  if (!value || typeof value !== "object") return false;
+  const result = value as Partial<MemorySupersedeResult>;
+  return typeof result.updated === "boolean"
+    && (result.failure === undefined || SUPERSEDE_FAILURES.has(result.failure))
+    && (result.atomic === undefined || typeof result.atomic === "boolean")
+    && (result.partial === undefined || typeof result.partial === "boolean")
+    && (result.created === undefined || typeof result.created === "boolean");
+}
 type FeedbackArgs = z.infer<z.ZodObject<typeof feedbackShape>>;
 
 async function remember(
@@ -728,11 +759,115 @@ async function supersede(
     actorId: identity.actorId,
     accessThreadId: identity.threadId,
   };
-  const previous = ctx.backend.getById ? await ctx.backend.getById(args.memoryId, idScope) : null;
-  if (ctx.backend.getById && !previous) {
+  if (ctx.backend.supersede) {
+    let result: MemorySupersedeResult | undefined;
+    let atomicRouteMissing = false;
+    try {
+      result = await ctx.backend.supersede({
+        memoryId: args.memoryId,
+        newText: args.newText,
+        reason: args.reason ?? null,
+        ...idScope,
+        source: {
+          sourceType: ctx.sourceType || "agent-tool",
+          sourceId: ctx.sourceId ?? null,
+          sourceSessionId: identity.threadId ?? null,
+        },
+        metadata: ctx.metadata,
+      });
+    } catch (error) {
+      if (!isMissingRouteError(error)) throw error;
+      atomicRouteMissing = true;
+      // A current SDK can talk to an older server. Only an explicit missing
+      // route falls through to the guarded legacy sequence below; auth,
+      // validation, timeout and server failures must remain visible.
+    }
+    if (!atomicRouteMissing) {
+      if (!isSupersedeResponseEnvelope(result)) {
+        return {
+          ok: false,
+          text: `The backend returned a malformed correction response for ${args.memoryId}. Reconcile the memory before relying on the correction.`,
+          data: { memoryId: args.memoryId, archived: false, atomic: false },
+        };
+      }
+      if (!result.updated) {
+        if (result.failure === "identical") {
+          return {
+            ok: false,
+            text: `newText is identical to ${args.memoryId}; nothing to supersede.`,
+            data: { memoryId: args.memoryId, archived: false, atomic: result.atomic ?? false },
+          };
+        }
+        if (result.partial) {
+          const cause = result.failure === "provider_error"
+            ? `${args.memoryId} could not be retired because its provider failed`
+            : `${args.memoryId} changed before it could be retired`;
+          return {
+            ok: false,
+            text: `Stored replacement${result.replacement ? ` id=${result.replacement.id}` : ""}, but ${cause}. Reconcile these memories before relying on either one.`,
+            data: {
+              memoryId: args.memoryId,
+              newId: result.replacement?.id,
+              archived: false,
+              atomic: result.atomic ?? false,
+              partial: true,
+            },
+          };
+        }
+        if (result.failure === "raced") {
+          return {
+            ok: false,
+            text: `${args.memoryId} changed during the correction. Recall the current memory and retry against its active id.`,
+            data: { memoryId: args.memoryId, archived: false, atomic: result.atomic ?? false },
+          };
+        }
+        return {
+          ok: false,
+          text: `No active memory with id=${args.memoryId}. It may already be superseded.`,
+          data: { memoryId: args.memoryId, archived: false, atomic: result.atomic ?? false },
+        };
+      }
+      if (
+        !result.replacement
+        || typeof result.replacement.id !== "string"
+        || result.replacement.id.trim().length === 0
+      ) {
+        return {
+          ok: false,
+          text: `The backend reported that ${args.memoryId} was replaced but omitted a valid replacement id. Reconcile the memory before relying on the correction.`,
+          data: { memoryId: args.memoryId, archived: false, atomic: result.atomic ?? false },
+        };
+      }
+      return {
+        ok: true,
+        text: `Replaced ${args.memoryId} with [${result.replacement.memoryType}] ${truncate(args.newText, 120)} — id=${result.replacement.id}`,
+        data: {
+          memoryId: args.memoryId,
+          newId: result.replacement.id,
+          archived: true,
+          atomic: result.atomic ?? false,
+          created: result.created,
+        },
+      };
+    }
+    // An older server without the atomic route continues into the guarded
+    // get -> ingest -> retire flow below.
+  }
+
+  let legacyCanRead = Boolean(ctx.backend.getById);
+  let previous: MemoryRecord | null = null;
+  if (ctx.backend.getById) {
+    try {
+      previous = await ctx.backend.getById(args.memoryId, idScope);
+    } catch (error) {
+      if (!isMissingRouteError(error)) throw error;
+      legacyCanRead = false;
+    }
+  }
+  if (legacyCanRead && !previous) {
     return { ok: false, text: `No active memory with id=${args.memoryId}.` };
   }
-  if (previous && previous.text.trim().toLowerCase() === args.newText.trim().toLowerCase()) {
+  if (previous && normalizeKey(previous.text) === normalizeKey(args.newText)) {
     return { ok: false, text: `newText is identical to ${args.memoryId}; nothing to supersede.` };
   }
 
@@ -740,7 +875,7 @@ async function supersede(
   // authorization/existence preflight before creating a replacement, otherwise
   // a guessed private id would still let the caller inject a bogus memory.
   let downrankedBeforeIngest = false;
-  if (!ctx.backend.getById) {
+  if (!legacyCanRead) {
     const result = await ctx.backend.applyFeedback({
       memoryId: args.memoryId,
       signal: "negative",
@@ -773,34 +908,44 @@ async function supersede(
   if (!ctx.backend.retire) {
     return {
       ok: true,
-      text: `Stored replacement${newId ? ` id=${newId}` : ""} and downranked ${args.memoryId}. Remote memory-core exposes no status endpoint, so the old memory is suppressed but not archived.`,
-      data: { memoryId: args.memoryId, newId, archived: false },
+      text: `Stored replacement${newId ? ` id=${newId}` : ""} and downranked ${args.memoryId}. Remote memory-core exposes no status endpoint, so the old memory remains active and may still be recalled.`,
+      data: { memoryId: args.memoryId, newId, archived: false, atomic: false },
     };
   }
 
-  const retired = await ctx.backend.retire(
-    args.memoryId,
-    "superseded",
-    {
-      supersededAt: new Date().toISOString(),
-      supersededBy: newId ?? null,
-      supersedeReason: args.reason ?? null,
-    },
-    idScope,
-  );
+  let retired: boolean;
+  try {
+    retired = await ctx.backend.retire(
+      args.memoryId,
+      "superseded",
+      {
+        supersededAt: new Date().toISOString(),
+        supersededBy: newId ?? null,
+        supersedeReason: args.reason ?? null,
+      },
+      idScope,
+    );
+  } catch (error) {
+    if (!isMissingRouteError(error)) throw error;
+    return {
+      ok: true,
+      text: `Stored replacement${newId ? ` id=${newId}` : ""} and downranked ${args.memoryId}. The older remote server has no status route, so the old memory remains active and may still be recalled.`,
+      data: { memoryId: args.memoryId, newId, archived: false, atomic: false },
+    };
+  }
 
   if (!retired) {
     return {
       ok: false,
       text: `Stored replacement${newId ? ` id=${newId}` : ""}, but ${args.memoryId} changed before it could be retired. Reconcile these memories before relying on either one.`,
-      data: { memoryId: args.memoryId, newId, archived: false, partial: true },
+      data: { memoryId: args.memoryId, newId, archived: false, atomic: false, partial: true },
     };
   }
 
   return {
     ok: true,
     text: `Replaced ${args.memoryId} with [${memoryType}] ${truncate(args.newText, 120)}${newId ? ` — id=${newId}` : ""}`,
-    data: { memoryId: args.memoryId, newId, archived: true },
+    data: { memoryId: args.memoryId, newId, archived: true, atomic: false },
   };
 }
 

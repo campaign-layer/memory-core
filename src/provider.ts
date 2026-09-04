@@ -54,6 +54,12 @@ export interface AtomicMemoryIngestResult {
   record: MemoryRecord;
 }
 
+export interface AtomicMemorySupersedeResult {
+  previous: MemoryRecord;
+  replacement: MemoryRecord;
+  created: boolean;
+}
+
 export interface MemoryProvider {
   /** Provider-stage score gate used when callers omit minScore. The service
    *  uses this to reconstruct exact fail-open behavior after wide reranking. */
@@ -66,6 +72,16 @@ export interface MemoryProvider {
    * races at the storage boundary.
    */
   ingestOrReinforceExact?(candidate: MemoryRecord): Promise<AtomicMemoryIngestResult>;
+  /** Atomically creates or reuses the replacement and retires the prior active
+   * record. Implementations must authorize `id` inside `scope`, preserve the
+   * replacement's visibility locus, and write `supersededBy` using the id they
+   * actually saved (which can differ from `replacement.id` on exact reuse). */
+  supersedeWithReplacement?(
+    id: string,
+    replacement: MemoryRecord,
+    previousMetadataPatch: Record<string, unknown>,
+    scope: MemoryIdScope,
+  ): Promise<AtomicMemorySupersedeResult | null>;
   findDuplicate(candidate: MemoryRecord): Promise<MemoryRecord | null>;
   update(record: MemoryRecord): Promise<MemoryRecord>;
   search(query: MemorySearchQuery): Promise<MemorySearchHit[]>;

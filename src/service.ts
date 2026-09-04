@@ -16,9 +16,11 @@ import type {
   MemoryScope,
   MemorySearchHit,
   MemorySearchQuery,
+  MemorySupersedeRequest,
+  MemorySupersedeResult,
   MemoryType,
 } from "./types.js";
-import { clamp, normalizeText, uid } from "./utils.js";
+import { clamp, normalizeKey, normalizeText, supersessionHistoryFrom, uid } from "./utils.js";
 
 const DEFAULT_DECAY: DecayPolicy = { kind: "time", ttlDays: 180 };
 const DEFAULT_SCOPE: MemoryScope = "actor";
@@ -57,6 +59,37 @@ function normalizeRecord(record: MemoryRecord): MemoryRecord {
     updatedAt: record.updatedAt || now,
     decayPolicy: record.decayPolicy || DEFAULT_DECAY,
   };
+}
+
+function recordFromObservation(obs: MemoryObservation, ingestedAt: string): MemoryRecord {
+  const observedAt = obs.observedAt || ingestedAt;
+  return normalizeRecord({
+    id: uid("mem"),
+    tenantId: obs.tenantId,
+    spaceId: resolveSpaceId(obs),
+    appId: obs.appId,
+    actorId: obs.actorId,
+    threadId: obs.threadId || null,
+    scope: obs.scope || DEFAULT_SCOPE,
+    memoryType: normalizeMemoryType(obs.memoryType),
+    text: obs.text,
+    summary: obs.summary || null,
+    metadata: obs.metadata || {},
+    confidence: obs.confidence ?? DEFAULT_CONFIDENCE,
+    importance: obs.importance ?? DEFAULT_IMPORTANCE,
+    status: "active",
+    source: obs.source,
+    decayPolicy: obs.decayPolicy || DEFAULT_DECAY,
+    firstSeenAt: observedAt,
+    lastSeenAt: ingestedAt,
+    createdAt: ingestedAt,
+    updatedAt: ingestedAt,
+    stats: {
+      selectedCount: 0,
+      positiveCount: 0,
+      negativeCount: 0,
+    },
+  });
 }
 
 // Every MemoryType gets a bucket, so callers can index byType without a presence check.
@@ -315,35 +348,7 @@ export class MemoryCoreService {
       // already stale, so ingest returned created=1 for a record that getById,
       // search, listByActor and getProfile all refused to return.
       const ingestedAt = new Date().toISOString();
-      const observedAt = obs.observedAt || ingestedAt;
-      const candidate = normalizeRecord({
-        id: uid("mem"),
-        tenantId: obs.tenantId,
-        spaceId: resolveSpaceId(obs),
-        appId: obs.appId,
-        actorId: obs.actorId,
-        threadId: obs.threadId || null,
-        scope: obs.scope || DEFAULT_SCOPE,
-        memoryType: normalizeMemoryType(obs.memoryType),
-        text: obs.text,
-        summary: obs.summary || null,
-        metadata: obs.metadata || {},
-        confidence: obs.confidence ?? DEFAULT_CONFIDENCE,
-        importance: obs.importance ?? DEFAULT_IMPORTANCE,
-        status: "active",
-        source: obs.source,
-        decayPolicy: obs.decayPolicy || DEFAULT_DECAY,
-        // firstSeenAt keeps the event time so temporal reasoning still has it.
-        firstSeenAt: observedAt,
-        lastSeenAt: ingestedAt,
-        createdAt: ingestedAt,
-        updatedAt: ingestedAt,
-        stats: {
-          selectedCount: 0,
-          positiveCount: 0,
-          negativeCount: 0,
-        },
-      });
+      const candidate = recordFromObservation(obs, ingestedAt);
 
       // Durable providers can arbitrate exact duplicates in the same storage
       // transaction as the write. This is the only path that is safe across
@@ -628,6 +633,140 @@ export class MemoryCoreService {
   ): Promise<{ updated: boolean; record?: MemoryRecord }> {
     const record = await this.provider.retire(memoryId, status, metadataPatch, scope);
     return record ? { updated: true, record } : { updated: false };
+  }
+
+  /**
+   * Replaces one active memory while preserving its type, visibility locus and
+   * retention policy. Durable providers perform the create/reuse + retirement in one
+   * transaction; the fallback remains for third-party providers implementing
+   * the older interface and reports a partial outcome if retirement loses a
+   * race after the replacement is stored.
+   */
+  async supersedeMemory(input: MemorySupersedeRequest): Promise<MemorySupersedeResult> {
+    const normalizedNewText = normalizeText(input.newText);
+    if (normalizedNewText.length < 4 || normalizedNewText.length > MAX_TEXT_LEN) {
+      throw new RangeError(`newText must be 4..${MAX_TEXT_LEN} characters after whitespace normalization`);
+    }
+    const scope: MemoryIdScope = {
+      tenantId: input.tenantId,
+      spaceId: input.spaceId,
+      appId: input.appId,
+      actorId: input.actorId,
+      accessThreadId: input.accessThreadId,
+    };
+    const previous = await this.provider.getById(input.memoryId, scope);
+    if (!previous) return { updated: false, failure: "not_found" };
+
+    if (normalizeKey(previous.text) === normalizeKey(normalizedNewText)) {
+      return { updated: false, failure: "identical", previous };
+    }
+
+    const now = new Date().toISOString();
+    const replacement = recordFromObservation({
+      tenantId: previous.tenantId,
+      spaceId: previous.spaceId,
+      // These coordinates also affect profile grouping and explicit thread
+      // filters outside the scope visibility key. Keep them stable; record the
+      // correcting principal separately as provenance metadata.
+      appId: previous.appId,
+      actorId: previous.actorId,
+      threadId: previous.threadId,
+      memoryType: previous.memoryType,
+      scope: previous.scope,
+      text: normalizedNewText,
+      metadata: {
+        ...(input.metadata ?? {}),
+        supersedes: previous.id,
+        supersessionHistory: [{ memoryId: previous.id, reason: input.reason ?? null }],
+        supersedeReason: input.reason ?? null,
+        correctedByAppId: input.appId,
+        correctedByActorId: input.actorId,
+        correctedInThreadId: input.accessThreadId ?? null,
+      },
+      source: input.source,
+      confidence: previous.confidence,
+      importance: previous.importance,
+      decayPolicy: previous.decayPolicy,
+      observedAt: now,
+    }, now);
+    const previousPatch = {
+      supersededAt: now,
+      supersedeReason: input.reason ?? null,
+    };
+
+    if (this.provider.supersedeWithReplacement) {
+      const result = await this.provider.supersedeWithReplacement(
+        previous.id,
+        replacement,
+        previousPatch,
+        scope,
+      );
+      if (!result) return { updated: false, atomic: true, failure: "raced" };
+      return {
+        updated: true,
+        atomic: true,
+        previous: result.previous,
+        replacement: result.replacement,
+        created: result.created,
+      };
+    }
+
+    let saved: MemoryRecord;
+    let created: boolean;
+    if (this.provider.ingestOrReinforceExact) {
+      const outcome = await this.provider.ingestOrReinforceExact(replacement);
+      saved = outcome.record;
+      created = outcome.created;
+    } else {
+      const duplicate = await this.provider.findDuplicate(replacement);
+      if (duplicate) {
+        saved = await this.provider.update(normalizeRecord({
+          ...duplicate,
+          lastSeenAt: now,
+          updatedAt: now,
+          confidence: Math.max(duplicate.confidence, replacement.confidence),
+          importance: Math.max(duplicate.importance, replacement.importance),
+          summary: duplicate.summary || replacement.summary,
+          metadata: {
+            ...duplicate.metadata,
+            ...replacement.metadata,
+            supersessionHistory: [
+              ...supersessionHistoryFrom(duplicate.metadata),
+              ...supersessionHistoryFrom(replacement.metadata),
+            ],
+          },
+          // The canonical duplicate keeps its provenance coordinates, but the
+          // corrected fact must not silently inherit a shorter retention policy.
+          decayPolicy: replacement.decayPolicy,
+        }));
+        created = false;
+      } else {
+        [saved] = await this.provider.ingest([replacement]);
+        created = true;
+      }
+    }
+
+    let retired: MemoryRecord | null;
+    try {
+      retired = await this.provider.retire(previous.id, "superseded", {
+        ...previousPatch,
+        supersededBy: saved.id,
+      }, scope);
+    } catch {
+      // A successful replacement write followed by a failed retirement is a
+      // partial correction. Do not let the exception imply that no write happened.
+      return {
+        updated: false,
+        atomic: false,
+        failure: "provider_error",
+        replacement: saved,
+        created,
+        partial: true,
+      };
+    }
+    return retired
+      ? { updated: true, atomic: false, previous: retired, replacement: saved, created }
+      : { updated: false, atomic: false, failure: "raced", replacement: saved, created, partial: true };
   }
 
   private profileFrom(

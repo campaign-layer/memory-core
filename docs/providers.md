@@ -55,11 +55,21 @@ Contracts every implementation shares:
   actors/apps in one space; app, actor, and thread progressively narrow access. Id-addressed
   operations accept the same caller scope so an opaque id cannot bypass private visibility.
 - `findDuplicate` matches on **exact normalized text** within the same visibility locus and
-  memory type. Nothing does semantic dedupe, so a revised fact is stored alongside the stale
-  one, both `active`.
+  memory type. Ordinary ingest does no semantic dedupe, so a revised fact is stored alongside
+  the stale one unless the caller explicitly invokes supersede.
 - `retire()` is a one-way, scope-checked active → `superseded`/`archived` mutation. Postgres
   performs the visibility check and update in one statement; the REST status route cannot
   restore a retired record.
+- `supersedeWithReplacement()` is the optional provider-level atomic correction primitive.
+  In-memory commits synchronously; Postgres locks the old record and inserts/reuses the
+  replacement plus retirement in one transaction. Implementations must link `supersededBy`
+  to the id actually saved because exact reuse can choose a different id from the candidate.
+  On exact reuse, the canonical row keeps its producer coordinates, adopts the corrected
+  record's decay policy, and appends the old id/reason to `supersessionHistory`. File and older
+  third-party providers use the service fallback and report `atomic: false`; `partial: true`
+  means the replacement was stored but retirement either lost a race or raised a provider
+  error. PostgreSQL retries serialization/deadlock failures up to three attempts; an exhausted
+  retry remains a visible server error, never a silent partial success.
 - `compact()` returns `{archivedExpired, archivedSuperseded}`. Explicit supersede flows set
   the intermediate status; automatic contradiction resolution is not implemented.
 
