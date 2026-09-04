@@ -599,6 +599,23 @@ type SupersedeArgs = z.infer<z.ZodObject<typeof supersedeShape>>;
 function isMissingRouteError(error: unknown): boolean {
   return error instanceof MemoryCoreHttpError && (error.status === 404 || error.status === 405);
 }
+
+const SUPERSEDE_FAILURES = new Set<NonNullable<MemorySupersedeResult["failure"]>>([
+  "not_found",
+  "identical",
+  "raced",
+  "provider_error",
+]);
+
+function isSupersedeResponseEnvelope(value: unknown): value is MemorySupersedeResult {
+  if (!value || typeof value !== "object") return false;
+  const result = value as Partial<MemorySupersedeResult>;
+  return typeof result.updated === "boolean"
+    && (result.failure === undefined || SUPERSEDE_FAILURES.has(result.failure))
+    && (result.atomic === undefined || typeof result.atomic === "boolean")
+    && (result.partial === undefined || typeof result.partial === "boolean")
+    && (result.created === undefined || typeof result.created === "boolean");
+}
 type FeedbackArgs = z.infer<z.ZodObject<typeof feedbackShape>>;
 
 async function remember(
@@ -744,6 +761,7 @@ async function supersede(
   };
   if (ctx.backend.supersede) {
     let result: MemorySupersedeResult | undefined;
+    let atomicRouteMissing = false;
     try {
       result = await ctx.backend.supersede({
         memoryId: args.memoryId,
@@ -759,11 +777,19 @@ async function supersede(
       });
     } catch (error) {
       if (!isMissingRouteError(error)) throw error;
+      atomicRouteMissing = true;
       // A current SDK can talk to an older server. Only an explicit missing
       // route falls through to the guarded legacy sequence below; auth,
       // validation, timeout and server failures must remain visible.
     }
-    if (result) {
+    if (!atomicRouteMissing) {
+      if (!isSupersedeResponseEnvelope(result)) {
+        return {
+          ok: false,
+          text: `The backend returned a malformed correction response for ${args.memoryId}. Reconcile the memory before relying on the correction.`,
+          data: { memoryId: args.memoryId, archived: false, atomic: false },
+        };
+      }
       if (!result.updated) {
         if (result.failure === "identical") {
           return {
@@ -801,10 +827,14 @@ async function supersede(
           data: { memoryId: args.memoryId, archived: false, atomic: result.atomic ?? false },
         };
       }
-      if (!result.replacement) {
+      if (
+        !result.replacement
+        || typeof result.replacement.id !== "string"
+        || result.replacement.id.trim().length === 0
+      ) {
         return {
           ok: false,
-          text: `The backend reported that ${args.memoryId} was replaced but omitted the replacement record. Reconcile the memory before relying on the correction.`,
+          text: `The backend reported that ${args.memoryId} was replaced but omitted a valid replacement id. Reconcile the memory before relying on the correction.`,
           data: { memoryId: args.memoryId, archived: false, atomic: result.atomic ?? false },
         };
       }

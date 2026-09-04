@@ -526,7 +526,7 @@ test("remote supersede downgrades only missing routes and never hides other fail
   }
 });
 
-test("supersede fails closed when a backend omits its claimed replacement", async () => {
+test("supersede fails closed when a backend omits its claimed replacement id", async () => {
   const result = await dispatch("supersede", {
     memoryId: "mem_old",
     newText: "The release is Friday",
@@ -545,11 +545,75 @@ test("supersede fails closed when a backend omits its claimed replacement", asyn
         processingTime: 0,
       }),
       applyFeedback: async () => ({ updated: false }),
-      supersede: async () => ({ updated: true, atomic: true }),
+      supersede: async () => ({
+        updated: true,
+        atomic: true,
+        replacement: { memoryType: "fact" } as never,
+      }),
     },
   });
   assert.equal(result.ok, false);
-  assert.match(result.text, /omitted the replacement record/);
+  assert.match(result.text, /omitted a valid replacement id/);
+  assert.equal((result.data as { newId?: string }).newId, undefined);
+});
+
+test("remote supersede never downgrades a malformed successful response", async () => {
+  let legacyReads = 0;
+  const backend = createRemoteBackend({
+    ingest: async () => ({ created: 0, updated: 0, records: [] }),
+    search: async () => ({ count: 0, hits: [] }),
+    buildContext: async () => ({
+      contextText: "",
+      selectedMemories: [],
+      profileSummary: "",
+      tokenEstimate: 0,
+      totalMemories: 0,
+      processingTime: 0,
+    }),
+    applyFeedback: async () => ({ updated: false }),
+    getMemory: async () => {
+      legacyReads++;
+      return null;
+    },
+    retireMemory: async () => ({ updated: false }),
+    supersedeMemory: async () => null as never,
+  });
+
+  const result = await dispatch("supersede", {
+    memoryId: "mem_old",
+    newText: "The release is Friday",
+  }, { identity: IDENTITY, backend });
+
+  assert.equal(result.ok, false);
+  assert.match(result.text, /malformed correction response/);
+  assert.equal(legacyReads, 0);
+});
+
+test("supersede rejects an unknown backend failure code", async () => {
+  const result = await dispatch("supersede", {
+    memoryId: "mem_old",
+    newText: "The release is Friday",
+  }, {
+    identity: IDENTITY,
+    backend: {
+      kind: "remote",
+      ingest: async () => ({ created: 0, updated: 0, ids: [] }),
+      search: async () => [],
+      buildContext: async () => ({
+        contextText: "",
+        selectedMemories: [],
+        profileSummary: "",
+        tokenEstimate: 0,
+        totalMemories: 0,
+        processingTime: 0,
+      }),
+      applyFeedback: async () => ({ updated: false }),
+      supersede: async () => ({ updated: false, failure: "mystery" }) as never,
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.text, /malformed correction response/);
 });
 
 test("anthropic export is structurally valid", () => {

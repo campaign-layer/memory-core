@@ -1078,15 +1078,16 @@ upstream build through a fault-injected multi-framework canary before starting t
 
 ### Validation
 
-- Node 22 application suite: 219 tests, 218 passed, zero failed, one optional ONNX test skipped.
+- Node 22 application suite: 221 tests, 220 passed, zero failed, one optional ONNX test skipped.
 - Live PostgreSQL suite: 43 tests, 36 passed, zero failed, seven pgvector-only tests skipped
   because the local database lacks the extension. Atomic reuse, races, concurrency, audit links,
   migration integrity, and deadlock regression tests passed.
 - Root and benchmark TypeScript checks, `git diff --check`, seven Hermes contract tests, and the
   embedded file-backed MCP remember/recall/restart/supersede/forget verifier passed.
-- Claude Opus reviewed a frozen code-only snapshot after the original blocker repairs and returned
-  `CLEAR` with no blockers. A later local audit found one structured Hermes partial-outcome minor;
-  it was fixed and retested, so the final commit still requires a fresh exact-snapshot clearance.
+- Claude Opus reviewed exact code commit `f15cc86` from a frozen, read-only snapshot and returned
+  `CLEAR` with no blockers. A subsequent published-PR review found that malformed successful
+  TypeScript adapter responses could still enter the legacy path or omit the replacement id; the
+  adapter now validates the response envelope and fails closed, with three focused regressions.
 - On the bench host, the exact-upstream `95bd547` 900-second canary passed 3,436 requests, 430
   acknowledged writes, all 11 framework probes, four graceful/SIGKILL faults, and five audits
   covering 918 records with zero loss or isolation failures. A detached 24-hour primary run is
