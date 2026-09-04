@@ -1,4 +1,4 @@
-import type { MemoryIdScope, MemoryProvider } from "../provider.js";
+import type { AtomicMemorySupersedeResult, MemoryIdScope, MemoryProvider } from "../provider.js";
 import type {
   MemoryCompactResult,
   MemoryFeedbackInput,
@@ -8,9 +8,10 @@ import type {
   MemorySearchHit,
   MemorySearchQuery,
 } from "../types.js";
-import { isExpired, recencyScore } from "../utils.js";
+import { isExpired, normalizeKey, recencyScore, supersessionHistoryFrom } from "../utils.js";
 import {
   memoryDedupeKey,
+  memoryVisibilityKey,
   memoryVisibleTo,
   memoryVisibleToIdScope,
   normalizeRecordSpace,
@@ -506,6 +507,75 @@ export class InMemoryProvider implements MemoryProvider {
     };
     this.index(retired);
     return retired;
+  }
+
+  async supersedeWithReplacement(
+    id: string,
+    replacement: MemoryRecord,
+    previousMetadataPatch: Record<string, unknown>,
+    scope: MemoryIdScope,
+  ): Promise<AtomicMemorySupersedeResult | null> {
+    const previous = this.records.get(id);
+    if (!previous || !this.isVisible(previous, Date.now()) || !memoryVisibleToIdScope(previous, scope)) {
+      return null;
+    }
+    replacement = normalizeRecordSpace(replacement);
+    if (replacement.status !== "active") {
+      throw new Error("in-memory-provider: replacement must be active");
+    }
+    if (replacement.memoryType !== previous.memoryType ||
+        replacement.scope !== previous.scope ||
+        memoryVisibilityKey(replacement) !== memoryVisibilityKey(previous)) {
+      return null;
+    }
+    if (normalizeKey(replacement.text) === normalizeKey(previous.text)) {
+      return null;
+    }
+    const idCollision = this.records.get(replacement.id);
+    if (idCollision) {
+      throw new Error(`in-memory-provider: replacement id ${replacement.id} already exists`);
+    }
+
+    const duplicateId = this.dupIndex.get(this.dupKey(replacement));
+    const duplicate = duplicateId ? this.records.get(duplicateId) : undefined;
+    const duplicateIsActive = duplicate && this.isVisible(duplicate, Date.now());
+    const saved = duplicateIsActive
+      ? {
+          ...duplicate,
+          lastSeenAt: replacement.lastSeenAt,
+          updatedAt: replacement.updatedAt,
+          confidence: Math.max(duplicate.confidence, replacement.confidence),
+          importance: Math.max(duplicate.importance, replacement.importance),
+          summary: duplicate.summary || replacement.summary,
+          metadata: {
+            ...duplicate.metadata,
+            ...replacement.metadata,
+            supersessionHistory: [
+              ...supersessionHistoryFrom(duplicate.metadata),
+              ...supersessionHistoryFrom(replacement.metadata),
+            ],
+          },
+          decayPolicy: replacement.decayPolicy,
+        }
+      : replacement;
+
+    // Everything above is validation. These two synchronous index mutations
+    // are the in-process commit point; search cannot observe both as active.
+    this.index(saved);
+    const retired: MemoryRecord = {
+      ...previous,
+      status: "superseded",
+      metadata: {
+        ...previous.metadata,
+        ...previousMetadataPatch,
+        supersededBy: saved.id,
+      },
+      updatedAt: replacement.updatedAt,
+    };
+    this.index(retired);
+    await this.embedRecords([saved]);
+
+    return { previous: retired, replacement: saved, created: !duplicateIsActive };
   }
 
   async applyFeedback(feedback: MemoryFeedbackInput): Promise<MemoryRecord | null> {

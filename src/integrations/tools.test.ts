@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { InMemoryProvider } from "../providers/in-memory-provider.js";
 import { MemoryCoreService } from "../service.js";
+import { MemoryCoreHttpError } from "../client.js";
 import { runAnthropicTurn } from "./adapters/anthropic.js";
 import { createMemoryToolkit } from "./adapters/generic.js";
 import { hermesMcpConfig } from "./adapters/hermes.js";
@@ -72,6 +73,7 @@ test("schemas reject bad input", () => {
   assert.equal(forget.safeParse({ memoryId: "m1", reason: null }).success, true);
   const supersede = getMemoryTool("supersede")!.schema;
   assert.equal(supersede.safeParse({ memoryId: "m1", newText: "updated fact", reason: null }).success, true);
+  assert.equal(supersede.safeParse({ memoryId: "m1", newText: "ab  " }).success, false);
 
   const feedback = getMemoryTool("feedback")!.schema;
   assert.equal(feedback.safeParse({ memoryId: "m1", signal: "positive" }).success, false);
@@ -170,6 +172,7 @@ test("dispatch feedback, forget and supersede close the correction loop", async 
     ctx,
   );
   assert.equal(moved.ok, true);
+  assert.equal((moved.data as { atomic: boolean }).atomic, true);
   const newId = (moved.data as { newId: string }).newId;
 
   const afterMove = await dispatch("recall", { query: "lives in" }, ctx);
@@ -302,7 +305,7 @@ test("remote backend downranks when it cannot archive", async () => {
   );
 });
 
-test("current remote backend reads and retires through the scoped status API", async () => {
+test("current remote backend supersedes atomically and retires through scoped APIs", async () => {
   const provider = new InMemoryProvider();
   const service = new MemoryCoreService(provider);
   const ctx: MemoryToolContext = {
@@ -321,10 +324,12 @@ test("current remote backend reads and retires through the scoped status API", a
       getMemory: (memoryId, scope) => service.getMemory(memoryId, scope),
       retireMemory: (memoryId, status, patch, scope) =>
         service.retireMemory(memoryId, status, patch, scope),
+      supersedeMemory: (input) => service.supersedeMemory(input),
     }),
   };
   assert.ok(ctx.backend.getById);
   assert.ok(ctx.backend.retire);
+  assert.ok(ctx.backend.supersede);
 
   const stored = await dispatch("remember", { text: "The release review is Tuesday", memoryType: "fact" }, ctx);
   const oldId = (stored.data as { id: string }).id;
@@ -335,6 +340,7 @@ test("current remote backend reads and retires through the scoped status API", a
   );
   assert.equal(replaced.ok, true, replaced.text);
   assert.equal((replaced.data as { archived: boolean }).archived, true);
+  assert.equal((replaced.data as { atomic: boolean }).atomic, true);
   assert.equal(await provider.getById(oldId, {
     tenantId: IDENTITY.tenantId,
     appId: IDENTITY.appId,
@@ -346,6 +352,204 @@ test("current remote backend reads and retires through the scoped status API", a
   const forgotten = await dispatch("forget", { memoryId: newId, reason: "test cleanup" }, ctx);
   assert.equal(forgotten.ok, true, forgotten.text);
   assert.equal((forgotten.data as { archived: boolean }).archived, true);
+});
+
+test("remote backend uses a current atomic supersede endpoint without legacy id APIs", async () => {
+  let calls = 0;
+  const backend = createRemoteBackend({
+    ingest: async () => ({ created: 0, updated: 0, records: [] }),
+    search: async () => ({ count: 0, hits: [] }),
+    buildContext: async () => ({
+      contextText: "",
+      selectedMemories: [],
+      profileSummary: "",
+      tokenEstimate: 0,
+      totalMemories: 0,
+      processingTime: 0,
+    }),
+    applyFeedback: async () => ({ updated: false }),
+    supersedeMemory: async (input) => {
+      calls++;
+      return {
+        updated: true,
+        atomic: true,
+        created: true,
+        replacement: {
+          id: "mem_replacement",
+          tenantId: input.tenantId,
+          spaceId: input.spaceId ?? input.actorId,
+          appId: input.appId,
+          actorId: input.actorId,
+          threadId: null,
+          memoryType: "fact",
+          scope: "actor",
+          text: input.newText,
+          summary: input.newText,
+          metadata: {},
+          confidence: 0.8,
+          importance: 0.5,
+          status: "active",
+          source: input.source,
+          decayPolicy: { kind: "none" },
+          firstSeenAt: "2026-09-04T00:00:00.000Z",
+          lastSeenAt: "2026-09-04T00:00:00.000Z",
+          createdAt: "2026-09-04T00:00:00.000Z",
+          updatedAt: "2026-09-04T00:00:00.000Z",
+          stats: { selectedCount: 0, positiveCount: 0, negativeCount: 0 },
+        },
+      };
+    },
+  });
+  assert.ok(backend.supersede);
+  assert.equal(backend.getById, undefined);
+  assert.equal(backend.retire, undefined);
+
+  const result = await dispatch("supersede", {
+    memoryId: "mem_old",
+    newText: "The release is Friday",
+  }, { identity: IDENTITY, backend });
+  assert.equal(result.ok, true, result.text);
+  assert.equal(calls, 1);
+});
+
+test("a current remote adapter falls back only when an older server lacks the atomic route", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  let atomicAttempts = 0;
+  const backend = createRemoteBackend({
+    ingest: async (input) => {
+      const result = await service.ingest(input);
+      return { created: result.created, updated: result.updated, records: result.records };
+    },
+    search: async (input) => {
+      const hits = await service.search(input);
+      return { count: hits.length, hits };
+    },
+    buildContext: (input) => service.buildContext(input),
+    applyFeedback: (input) => service.applyFeedback(input),
+    getMemory: (memoryId, scope) => service.getMemory(memoryId, scope),
+    retireMemory: (memoryId, status, patch, scope) => service.retireMemory(memoryId, status, patch, scope),
+    supersedeMemory: async () => {
+      atomicAttempts++;
+      throw new MemoryCoreHttpError(404, "HTTP 404");
+    },
+  });
+  const ctx: MemoryToolContext = { identity: IDENTITY, backend };
+  const stored = await dispatch("remember", { text: "The release is Monday" }, ctx);
+  const oldId = (stored.data as { id: string }).id;
+  const corrected = await dispatch("supersede", {
+    memoryId: oldId,
+    newText: "The release is Friday",
+  }, ctx);
+
+  assert.equal(corrected.ok, true, corrected.text);
+  assert.equal(atomicAttempts, 1);
+  assert.equal((corrected.data as { atomic: boolean }).atomic, false);
+});
+
+test("a current remote adapter preserves the downrank-only fallback for the oldest servers", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const backend = createRemoteBackend({
+    ingest: async (input) => {
+      const result = await service.ingest(input);
+      return { created: result.created, updated: result.updated, records: result.records };
+    },
+    search: async (input) => {
+      const hits = await service.search(input);
+      return { count: hits.length, hits };
+    },
+    buildContext: (input) => service.buildContext(input),
+    applyFeedback: (input) => service.applyFeedback(input),
+    getMemory: async () => { throw new MemoryCoreHttpError(404, "HTTP 404"); },
+    retireMemory: async () => { throw new MemoryCoreHttpError(404, "HTTP 404"); },
+    supersedeMemory: async () => { throw new MemoryCoreHttpError(404, "HTTP 404"); },
+  });
+  const ctx: MemoryToolContext = { identity: IDENTITY, backend };
+  const stored = await dispatch("remember", { text: "The release is Monday" }, ctx);
+  const oldId = (stored.data as { id: string }).id;
+  const corrected = await dispatch("supersede", {
+    memoryId: oldId,
+    newText: "The release is Friday",
+  }, ctx);
+
+  assert.equal(corrected.ok, true, corrected.text);
+  assert.match(corrected.text, /remains active and may still be recalled/);
+  assert.equal((corrected.data as { archived: boolean }).archived, false);
+  assert.equal(provider.dumpRecords().filter((record) => record.status === "active").length, 2);
+});
+
+test("remote supersede downgrades only missing routes and never hides other failures", async (t) => {
+  const failures: Array<[string, Error]> = [
+    ...[400, 401, 403, 409, 429, 500, 503].map((status) => [
+      `HTTP ${status}`,
+      new MemoryCoreHttpError(status, `HTTP ${status}`),
+    ] as [string, Error]),
+    ["network", new TypeError("fetch failed")],
+    ["timeout", new Error("memory-core request deadline exceeded after 100ms")],
+  ];
+
+  for (const [label, failure] of failures) {
+    await t.test(label, async () => {
+      let legacyReads = 0;
+      const backend = createRemoteBackend({
+        ingest: async () => ({ created: 0, updated: 0, records: [] }),
+        search: async () => ({ count: 0, hits: [] }),
+        buildContext: async () => ({
+          contextText: "",
+          selectedMemories: [],
+          profileSummary: "",
+          tokenEstimate: 0,
+          totalMemories: 0,
+          processingTime: 0,
+        }),
+        applyFeedback: async () => ({ updated: false }),
+        getMemory: async () => {
+          legacyReads++;
+          return null;
+        },
+        retireMemory: async () => ({ updated: false }),
+        supersedeMemory: async () => {
+          throw failure;
+        },
+      });
+
+      await assert.rejects(
+        dispatch("supersede", { memoryId: "mem_old", newText: "The release is Friday" }, {
+          identity: IDENTITY,
+          backend,
+        }),
+        (error) => error === failure,
+      );
+      assert.equal(legacyReads, 0);
+    });
+  }
+});
+
+test("supersede fails closed when a backend omits its claimed replacement", async () => {
+  const result = await dispatch("supersede", {
+    memoryId: "mem_old",
+    newText: "The release is Friday",
+  }, {
+    identity: IDENTITY,
+    backend: {
+      kind: "remote",
+      ingest: async () => ({ created: 0, updated: 0, ids: [] }),
+      search: async () => [],
+      buildContext: async () => ({
+        contextText: "",
+        selectedMemories: [],
+        profileSummary: "",
+        tokenEstimate: 0,
+        totalMemories: 0,
+        processingTime: 0,
+      }),
+      applyFeedback: async () => ({ updated: false }),
+      supersede: async () => ({ updated: true, atomic: true }),
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.text, /omitted the replacement record/);
 });
 
 test("anthropic export is structurally valid", () => {

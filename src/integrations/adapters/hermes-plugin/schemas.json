@@ -157,7 +157,7 @@
   },
   {
     "name": "supersede",
-    "description": "Replace an outdated memory with its current value using a guarded multi-step flow: the replacement is stored, then the old memory is retired. A partial result is reported if retirement races or fails. Use when a fact changed rather than was never true - moved city, switched framework, new title, revised deadline. Needs the old memory id from recall.",
+    "description": "Replace an outdated memory with its current value. Current in-memory and Postgres backends commit the replacement and retirement atomically; legacy backends report partial/non-atomic outcomes explicitly. Use when a fact changed rather than was never true - moved city, switched framework, new title, revised deadline. Needs the old memory id from recall.",
     "parameters": {
       "type": "object",
       "properties": {

@@ -92,8 +92,8 @@ def _ok(**fields: Any) -> str:
     return json.dumps(fields)
 
 
-def _err(message: str) -> str:
-    return json.dumps({"error": message})
+def _err(message: str, **fields: Any) -> str:
+    return json.dumps({"error": message, **fields})
 
 
 def _guard(fn):
@@ -318,6 +318,82 @@ def supersede(args: dict, **_: Any) -> str:
     reason = args.get("reason")
     if reason is not None and (not isinstance(reason, str) or len(reason) > 200):
         return _err("reason must be at most 200 characters")
+    identity = _identity()
+    try:
+        result = _request("/v1/memory/supersede", {
+            **_id_payload(memory_id),
+            "newText": new_text,
+            "reason": reason,
+            "source": {
+                "sourceType": "hermes-agent",
+                "sourceSessionId": identity.get("threadId"),
+            },
+        })
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (404, 405):
+            raise
+        exc.close()
+        return _supersede_legacy(memory_id, new_text, reason)
+
+    if not result.get("updated"):
+        if result.get("failure") == "identical":
+            return _err(
+                "newText is identical to %s; nothing to supersede" % memory_id,
+                memoryId=memory_id,
+                archived=False,
+                atomic=bool(result.get("atomic")),
+            )
+        if result.get("partial"):
+            replacement = result.get("replacement") or {}
+            provider_failed = result.get("failure") == "provider_error"
+            cause = (
+                "its provider failed during retirement"
+                if provider_failed
+                else "%s changed before retirement" % memory_id
+            )
+            return _err(
+                "replacement id=%s was stored, but %s; reconcile both"
+                % (replacement.get("id"), cause),
+                memoryId=memory_id,
+                newId=replacement.get("id"),
+                archived=False,
+                atomic=bool(result.get("atomic")),
+                partial=True,
+            )
+        if result.get("failure") == "raced":
+            return _err(
+                "%s changed during correction; recall and retry its active id" % memory_id,
+                memoryId=memory_id,
+                archived=False,
+                atomic=bool(result.get("atomic")),
+            )
+        return _err(
+            "no active memory with id=%s" % memory_id,
+            memoryId=memory_id,
+            archived=False,
+            atomic=bool(result.get("atomic")),
+        )
+
+    replacement = result.get("replacement")
+    if not isinstance(replacement, dict) or not replacement.get("id"):
+        return _err(
+            "memory-core reported success without a replacement record",
+            memoryId=memory_id,
+            archived=False,
+            atomic=bool(result.get("atomic")),
+        )
+    return _ok(
+        memoryId=memory_id,
+        newId=replacement["id"],
+        archived=True,
+        atomic=bool(result.get("atomic")),
+        created=result.get("created"),
+        note="Replacement stored and the old memory superseded.",
+    )
+
+
+def _supersede_legacy(memory_id: str, new_text: str, reason: Any) -> str:
+    """Compatibility with servers that predate the atomic correction route."""
     previous = _request("/v1/memory/get", _id_payload(memory_id)).get("memory")
     if not previous:
         return _err("no active memory with id=%s" % memory_id)
@@ -351,6 +427,7 @@ def supersede(args: dict, **_: Any) -> str:
         memoryId=memory_id,
         newId=new_id,
         archived=True,
+        atomic=False,
         note="Replacement stored and the old memory superseded.",
     )
 

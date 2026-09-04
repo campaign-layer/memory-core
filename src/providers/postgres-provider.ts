@@ -6,6 +6,7 @@ import pg from "pg";
 import type { Pool as PgPool, PoolClient } from "pg";
 import type {
   AtomicMemoryIngestResult,
+  AtomicMemorySupersedeResult,
   MemoryIdScope,
   MemoryProvider,
   ProviderHealthStatus,
@@ -25,7 +26,8 @@ import type {
   MemoryStatus,
   MemoryType,
 } from "../types.js";
-import { accessSpaceId, normalizeRecordSpace } from "../access.js";
+import { accessSpaceId, memoryVisibilityKey, normalizeRecordSpace } from "../access.js";
+import { normalizeKey } from "../utils.js";
 
 const { Pool } = pg;
 
@@ -939,6 +941,157 @@ export class PostgresMemoryProvider implements MemoryProvider {
         const created = record.id === candidate.id;
         if (created && prepared) await this.writeEmbeddings(client, [record], prepared);
         return { created, record };
+      });
+    } catch (error) {
+      const indexName = dedupeConstraintName(error);
+      if (indexName) throw new MemoryDedupeConflictError(indexName);
+      throw error;
+    }
+  }
+
+  async supersedeWithReplacement(
+    id: string,
+    replacement: MemoryRecord,
+    previousMetadataPatch: Record<string, unknown>,
+    scope: MemoryIdScope,
+  ): Promise<AtomicMemorySupersedeResult | null> {
+    await this.ready();
+    assertIdScope(scope, "supersedeWithReplacement");
+    replacement = normalizeRecordSpace(replacement);
+    assertWritableRecord(replacement, "supersedeWithReplacement");
+    if (replacement.status !== "active") {
+      throw new Error("postgres-provider: replacement must be active");
+    }
+
+    const prepared = await this.prepareEmbeddings([replacement]);
+    try {
+      return await this.withWriteTransaction(async (client) => {
+        const previousParams: unknown[] = [id];
+        const previousScopeSql = idScopeSql(
+          "m",
+          scope,
+          previousParams,
+          "supersedeWithReplacement",
+        );
+        const previousResult = await client.query<MemoryRow>(
+          `SELECT ${columnList("m")}
+             FROM memories m
+            WHERE m.id = $1
+              AND m.status = 'active'
+              ${previousScopeSql}
+              ${this.hideExpiredOnRead ? `AND NOT ${expiredSql("m")}` : ""}
+            FOR UPDATE OF m`,
+          previousParams,
+        );
+        const previousRow = previousResult.rows[0];
+        if (!previousRow) return null;
+        const previous = mapRow(previousRow);
+
+        if (replacement.memoryType !== previous.memoryType ||
+            replacement.scope !== previous.scope ||
+            memoryVisibilityKey(replacement) !== memoryVisibilityKey(previous)) {
+          return null;
+        }
+        if (normalizeKey(replacement.text) === normalizeKey(previous.text)) {
+          return null;
+        }
+
+        if (this.hideExpiredOnRead) {
+          await this.archiveExpiredExactDuplicates(client, [replacement]);
+        }
+
+        const params = new Params();
+        const cells = [
+          params.add(replacement.id),
+          params.add(replacement.tenantId),
+          params.add(replacement.spaceId),
+          params.add(replacement.appId),
+          params.add(replacement.actorId),
+          params.add(replacement.threadId ?? null),
+          params.add(replacement.scope),
+          params.add(replacement.memoryType),
+          params.add(replacement.text),
+          params.add(replacement.summary ?? null),
+          `${params.add(JSON.stringify(replacement.metadata ?? {}))}::jsonb`,
+          `${params.add(replacement.confidence)}::real`,
+          `${params.add(replacement.importance)}::real`,
+          params.add(replacement.status),
+          `${params.add(JSON.stringify(replacement.source ?? {}))}::jsonb`,
+          `${params.add(JSON.stringify(replacement.decayPolicy ?? { kind: "none" }))}::jsonb`,
+          `${params.add(replacement.firstSeenAt)}::timestamptz`,
+          `${params.add(replacement.lastSeenAt)}::timestamptz`,
+          `${params.add(replacement.createdAt)}::timestamptz`,
+          `${params.add(replacement.updatedAt)}::timestamptz`,
+          `${params.add(JSON.stringify(replacement.stats ?? {}))}::jsonb`,
+        ];
+        const replacementResult = await client.query<MemoryRow>(
+          `INSERT INTO memories (${columnList()})
+           VALUES (${cells.join(", ")})
+           ON CONFLICT ${exactConflictTarget(replacement.scope)} DO UPDATE SET
+             last_seen_at = GREATEST(memories.last_seen_at, EXCLUDED.last_seen_at),
+             updated_at = GREATEST(memories.updated_at, EXCLUDED.updated_at),
+             confidence = GREATEST(memories.confidence, EXCLUDED.confidence),
+             importance = GREATEST(memories.importance, EXCLUDED.importance),
+             summary = coalesce(memories.summary, EXCLUDED.summary),
+             decay_policy = EXCLUDED.decay_policy,
+             metadata = jsonb_set(
+               (CASE WHEN jsonb_typeof(memories.metadata) = 'object'
+                     THEN memories.metadata ELSE '{}'::jsonb END)
+               || (CASE WHEN jsonb_typeof(EXCLUDED.metadata) = 'object'
+                        THEN EXCLUDED.metadata ELSE '{}'::jsonb END),
+               '{supersessionHistory}',
+               (CASE
+                  WHEN jsonb_typeof(memories.metadata->'supersessionHistory') = 'array'
+                    THEN memories.metadata->'supersessionHistory'
+                  WHEN jsonb_typeof(memories.metadata->'supersedes') = 'string'
+                    THEN jsonb_build_array(jsonb_build_object(
+                      'memoryId', memories.metadata->>'supersedes',
+                      'reason', CASE WHEN jsonb_typeof(memories.metadata->'supersedeReason') = 'string'
+                                     THEN memories.metadata->>'supersedeReason' ELSE NULL END
+                    ))
+                  ELSE '[]'::jsonb
+                END)
+               ||
+               (CASE WHEN jsonb_typeof(EXCLUDED.metadata->'supersessionHistory') = 'array'
+                     THEN EXCLUDED.metadata->'supersessionHistory' ELSE '[]'::jsonb END),
+               true
+             )
+           WHERE ${normalizedDedupeTextSql("memories.text")} = ${normalizedDedupeTextSql("EXCLUDED.text")}
+           RETURNING ${columnList()}`,
+          params.values,
+        );
+        const replacementRow = replacementResult.rows[0];
+        if (!replacementRow) {
+          throw new Error(
+            "postgres-provider: replacement dedupe hash collision or index mismatch; refusing to merge distinct text",
+          );
+        }
+        const saved = mapRow(replacementRow);
+        if (saved.id === previous.id) {
+          throw new Error("postgres-provider: replacement resolved to the memory being superseded");
+        }
+
+        const retiredResult = await client.query<MemoryRow>(
+          `UPDATE memories m
+              SET status = 'superseded',
+                  metadata = (CASE WHEN jsonb_typeof(m.metadata) = 'object'
+                                   THEN m.metadata ELSE '{}'::jsonb END)
+                             || $2::jsonb
+                             || jsonb_build_object('supersededBy', $3::text),
+                  updated_at = $4::timestamptz
+            WHERE m.id = $1
+              AND m.status = 'active'
+            RETURNING ${columnList("m")}`,
+          [previous.id, JSON.stringify(previousMetadataPatch), saved.id, replacement.updatedAt],
+        );
+        const retiredRow = retiredResult.rows[0];
+        if (!retiredRow) {
+          throw new Error("postgres-provider: locked memory could not be superseded");
+        }
+
+        const created = saved.id === replacement.id;
+        if (created && prepared) await this.writeEmbeddings(client, [saved], prepared);
+        return { previous: mapRow(retiredRow), replacement: saved, created };
       });
     } catch (error) {
       const indexName = dedupeConstraintName(error);

@@ -101,6 +101,35 @@ export interface MemoryIngestResponse {
   recordsUpdated: number;
 }
 
+/** One guarded correction of an existing memory. The caller identity is part
+ * of the request because the id is opaque and globally unique. */
+export interface MemorySupersedeRequest {
+  memoryId: string;
+  newText: string;
+  reason?: string | null;
+  tenantId: string;
+  spaceId?: string;
+  appId: string;
+  actorId: string;
+  accessThreadId?: string;
+  source: MemorySource;
+  /** Producer metadata for the replacement. Lifecycle linkage is added by the service. */
+  metadata?: Record<string, unknown>;
+}
+
+export interface MemorySupersedeResult {
+  updated: boolean;
+  failure?: "not_found" | "identical" | "raced" | "provider_error";
+  /** True only when replacement and retirement committed as one provider operation. */
+  atomic?: boolean;
+  previous?: MemoryRecord;
+  replacement?: MemoryRecord;
+  /** False when the replacement reused an already-active exact duplicate. */
+  created?: boolean;
+  /** Only legacy providers without an atomic replacement primitive can report this. */
+  partial?: boolean;
+}
+
 export interface MemoryFilters {
   tenantId: string;
   /** Defaults to actorId, then appId for legacy app-wide callers. */

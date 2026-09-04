@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import io
 import os
+import urllib.error
 import unittest
 from unittest.mock import patch
 
@@ -78,8 +80,41 @@ class HermesToolsTest(unittest.TestCase):
             {"tenantId": "acme", "spaceId": "team", "appId": "hermes", "actorId": "alice"},
         )
 
-    def test_supersede_preserves_server_derived_type_and_scope(self):
+    def test_supersede_uses_atomic_endpoint(self):
+        with patch.dict(os.environ, IDENTITY_ENV, clear=True), patch.object(
+            tools.urllib.request,
+            "urlopen",
+            return_value=_Response({
+                "updated": True,
+                "atomic": True,
+                "created": True,
+                "replacement": {"id": "new_1"},
+            }),
+        ) as urlopen:
+            result = json.loads(tools.supersede({
+                "memoryId": "old_1",
+                "newText": "Current generated summary",
+            }))
+
+        self.assertEqual(result["newId"], "new_1")
+        self.assertTrue(result["atomic"])
+        self.assertEqual(urlopen.call_count, 1)
+        request = urlopen.call_args.args[0]
+        self.assertTrue(request.full_url.endswith("/v1/memory/supersede"))
+        body = json.loads(request.data)
+        self.assertEqual(body["memoryId"], "old_1")
+        self.assertEqual(body["source"]["sourceType"], "hermes-agent")
+
+    def test_supersede_falls_back_on_missing_route_and_preserves_server_fields(self):
+        missing = urllib.error.HTTPError(
+            "http://memory.test/v1/memory/supersede",
+            404,
+            "not found",
+            None,
+            io.BytesIO(b"not found"),
+        )
         responses = [
+            missing,
             _Response({"memory": {
                 "id": "old_1",
                 "text": "Old generated summary",
@@ -99,10 +134,53 @@ class HermesToolsTest(unittest.TestCase):
             }))
 
         self.assertEqual(result["newId"], "new_1")
-        ingest_request = urlopen.call_args_list[1].args[0]
+        self.assertFalse(result["atomic"])
+        ingest_request = urlopen.call_args_list[2].args[0]
         observation = json.loads(ingest_request.data)["observations"][0]
         self.assertEqual(observation["memoryType"], "summary")
         self.assertEqual(observation["scope"], "app")
+
+    def test_supersede_does_not_downgrade_server_failures(self):
+        unavailable = urllib.error.HTTPError(
+            "http://memory.test/v1/memory/supersede",
+            500,
+            "server error",
+            None,
+            io.BytesIO(b"internal"),
+        )
+        with patch.dict(os.environ, IDENTITY_ENV, clear=True), patch.object(
+            tools.urllib.request, "urlopen", side_effect=unavailable
+        ) as urlopen:
+            result = json.loads(tools.supersede({
+                "memoryId": "old_1",
+                "newText": "Current generated summary",
+            }))
+
+        self.assertIn("HTTP 500", result["error"])
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_supersede_reports_structured_partial_provider_failure(self):
+        with patch.dict(os.environ, IDENTITY_ENV, clear=True), patch.object(
+            tools.urllib.request,
+            "urlopen",
+            return_value=_Response({
+                "updated": False,
+                "atomic": False,
+                "partial": True,
+                "failure": "provider_error",
+                "replacement": {"id": "new_1"},
+            }),
+        ):
+            result = json.loads(tools.supersede({
+                "memoryId": "old_1",
+                "newText": "Current generated summary",
+            }))
+
+        self.assertIn("provider failed during retirement", result["error"])
+        self.assertEqual(result["newId"], "new_1")
+        self.assertFalse(result["atomic"])
+        self.assertTrue(result["partial"])
+        self.assertFalse(result["archived"])
 
 
 if __name__ == "__main__":

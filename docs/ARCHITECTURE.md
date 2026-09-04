@@ -134,7 +134,7 @@ source-code or production sign-off.
 | P0-A closed | `MemoryCoreClient` now rejects redirects, bounds the whole response and body, and requires HTTPS except loopback | Preserve redirect/deadline/body/URL tests |
 | P0-A containment | Extractor exceptions and successful no-facts windows are distinctly labelled and excluded from prompts by default | Replace V1 containment with durable V2 evidence/candidate state |
 | P2 partial | PostgreSQL exact-text dedupe is atomic; service batches can still partially commit and non-Postgres providers use the portable service path | Persisted idempotency plus one all-or-nothing store command |
-| P2 | Remote supersede is create → feedback → retire across requests | One compare-and-swap revision transaction |
+| P0 partial | Explicit supersede is atomic in-memory and in PostgreSQL; file/legacy providers remain guarded non-atomic fallbacks | Durable series/version heads plus transactional revision audit |
 | P2 | Extracted facts retain transient turn indexes but not durable source text/spans | Every accepted version links to immutable evidence ids and hashes/spans |
 | P2 | Direct provider `getById` can be called without a scope | Every store operation requires a resolved access context |
 | P0-A closed | Hosted model transports clamp `Retry-After`, reject redirects, bound bodies, and share one deadline across fetch/body/retry sleep | Preserve adversarial transport tests |
@@ -477,7 +477,10 @@ None of them has IDF. An improvement to one improves nothing else. Adding the Po
 
 - **Extraction.** The API accepts an already-formed `MemoryObservation`. So the caller must pre-digest raw conversation into atomic memory statements. memory-core is not a memory system today; it is a typed text store. Agents that dump raw turns in will get garbage out.
 - **Resolution.** `findDuplicate` compares `record.text.toLowerCase() === candidate.text.toLowerCase()` (`in-memory-provider.ts:78`). Exact string equality. So "I live in Lisbon" and "I moved to Berlin last month" both persist as active, contradictory, and permanently retrievable. This is the single biggest reason memory systems feel broken to users.
-- **Supersession.** `MemoryStatus` includes `"superseded"` and `DecayPolicy` exists — but **nothing in the codebase ever sets `superseded`**. Every provider returns `archivedSuperseded: 0` as a literal. The type system describes a lifecycle the code never implements.
+- **Supersession (historical audit finding).** At the time of the original audit nothing set
+  `"superseded"`. Explicit status retirement and atomic in-memory/PostgreSQL correction are now
+  implemented (see the current-status table above); automatic semantic contradiction discovery
+  is still absent, so ordinary ingest can leave conflicting statements active.
 - **Provenance.** `extractedFrom` exists only inside dual-layer's private interface, never in `MemoryRecord`. Consolidated memories cannot be traced to their sources.
 
 **Fix:** a real pipeline — `extract → embed → resolve → commit → consolidate` — with each stage a swappable strategy.

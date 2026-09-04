@@ -48,10 +48,12 @@ The route table lives in the [README](../README.md#http-api); this file is the p
    `importance`, keep the existing summary, shallow-merge metadata, `provider.update()`.
 5. Otherwise `provider.ingest([candidate])`.
 
-**What is not here:** no semantic dedupe, no contradiction detection, no supersession. Step 3
-is the whole resolution stage, and because it is exact string equality, a revised fact is
-stored alongside the stale one with both `active` and both permanently retrievable. This is
-the measured cause of the knowledge-update failures in [`BENCHMARKS.md`](./BENCHMARKS.md).
+**What is not here:** no semantic dedupe or automatic contradiction detection. Step 3 is the
+whole automatic resolution stage, so ordinary ingest stores a revised paraphrase alongside
+the stale fact with both `active`. A caller that knows the stale memory id can explicitly use
+`POST /v1/memory/supersede`; in-memory and Postgres commit that correction atomically. Missing
+automatic detection remains a measured cause of the knowledge-update failures in
+[`BENCHMARKS.md`](./BENCHMARKS.md).
 
 **Extraction** sits in front of step 1 and is **off by default**. `MEMORY_EXTRACTOR=none`
 selects a passthrough that turns each observation into exactly one fact with its text
@@ -132,6 +134,11 @@ Response fields: `profileSummary`, `profileMemories[{id, memoryType, text, prove
   in-memory, ±0.12 in dual-layer and postgres). That is the entire learning loop.
 - `POST /v1/memory/get` performs a scope-checked opaque-id read. `POST /v1/memory/status`
   atomically retires an active record to `superseded` or `archived`; it cannot restore one.
+- `POST /v1/memory/supersede` preserves the old record's type, visibility locus and decay
+  policy while replacing it. A newly created replacement also preserves producer coordinates;
+  exact reuse keeps the canonical row's producer coordinates and appends a correction history.
+  In-memory and Postgres make replacement plus retirement atomic; file and legacy providers
+  report their non-atomic fallback explicitly.
 - `POST /v1/memory/compact` archives decay-expired and explicitly superseded records. There
   is still no automatic contradiction Resolver.
 - Decay kinds: `none`, `time` (age from creation), `inactivity` (age from `lastSeenAt`).

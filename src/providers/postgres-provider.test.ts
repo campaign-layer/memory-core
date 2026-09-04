@@ -1372,6 +1372,151 @@ test("retire atomically enforces id visibility and merges lifecycle metadata", {
   );
 });
 
+test("service supersede is one Postgres transaction and concurrent corrections have one winner", { skip }, async () => {
+  const t = tenant("atomicrevision");
+  const service = new MemoryCoreService(provider!);
+  const shared = {
+    tenantId: t,
+    appId: APP,
+    actorId: "alice",
+    memoryType: "fact" as const,
+    source: { sourceType: "postgres-test" },
+    decayPolicy: { kind: "none" as const },
+  };
+  const [old, existing] = (await service.ingest({ observations: [
+    { ...shared, text: "The release is Monday", confidence: 0.9, importance: 0.8 },
+    {
+      ...shared,
+      text: "The release is Tuesday",
+      decayPolicy: { kind: "time", ttlDays: 1 },
+      metadata: { supersedes: "legacy-memory", supersedeReason: "legacy reason" },
+      confidence: 0.2,
+      importance: 0.1,
+      source: { sourceType: "canonical-source" },
+    },
+  ] })).records;
+  const request = {
+    tenantId: t,
+    spaceId: old.spaceId,
+    appId: APP,
+    actorId: "alice",
+    source: { sourceType: "postgres-correction" },
+  };
+
+  const reused = await service.supersedeMemory({
+    ...request,
+    memoryId: old.id,
+    newText: existing.text,
+    reason: "schedule changed",
+  });
+  assert.equal(reused.updated, true);
+  assert.equal(reused.created, false);
+  assert.equal(reused.replacement?.id, existing.id);
+  assert.deepEqual(reused.replacement?.decayPolicy, old.decayPolicy);
+  assert.equal(reused.replacement?.confidence, old.confidence);
+  assert.equal(reused.replacement?.importance, old.importance);
+  assert.equal(reused.replacement?.source.sourceType, "canonical-source");
+  assert.deepEqual(reused.replacement?.metadata.supersessionHistory, [
+    { memoryId: "legacy-memory", reason: "legacy reason" },
+    { memoryId: old.id, reason: "schedule changed" },
+  ]);
+
+  const [raceOld] = (await service.ingest({
+    observations: [{ ...shared, text: "The launch is Wednesday" }],
+  })).records;
+  const outcomes = await Promise.all([
+    service.supersedeMemory({ ...request, memoryId: raceOld.id, newText: "The launch is Thursday" }),
+    service.supersedeMemory({ ...request, memoryId: raceOld.id, newText: "The launch is Friday" }),
+  ]);
+  assert.equal(outcomes.filter((outcome) => outcome.updated).length, 1);
+  assert.equal(outcomes.filter((outcome) => !outcome.updated).length, 1);
+  assert.ok(outcomes.some((outcome) => outcome.failure === "not_found" || outcome.failure === "raced"));
+
+  const [workspaceOld, workspaceExisting] = (await service.ingest({ observations: [{
+    ...shared,
+    spaceId: "shared-revision-space",
+    threadId: "origin-thread",
+    scope: "workspace",
+    text: "The shared release channel is alpha",
+  }, {
+    ...shared,
+    spaceId: "shared-revision-space",
+    appId: "canonical-app",
+    actorId: "carol",
+    threadId: "canonical-thread",
+    scope: "workspace",
+    text: "The shared release channel is stable",
+    decayPolicy: { kind: "time", ttlDays: 1 },
+  }] })).records;
+  const workspaceCorrection = await service.supersedeMemory({
+    memoryId: workspaceOld.id,
+    newText: "The shared release channel is stable",
+    tenantId: t,
+    spaceId: workspaceOld.spaceId,
+    appId: "reviewer-app",
+    actorId: "bob",
+    accessThreadId: "review-thread",
+    source: { sourceType: "postgres-correction" },
+  });
+  assert.equal(workspaceCorrection.updated, true);
+  assert.equal(workspaceCorrection.created, false);
+  assert.equal(workspaceCorrection.replacement?.id, workspaceExisting.id);
+  assert.equal(workspaceCorrection.replacement?.appId, workspaceExisting.appId);
+  assert.equal(workspaceCorrection.replacement?.actorId, workspaceExisting.actorId);
+  assert.equal(workspaceCorrection.replacement?.threadId, workspaceExisting.threadId);
+  assert.deepEqual(workspaceCorrection.replacement?.decayPolicy, workspaceOld.decayPolicy);
+  assert.equal(workspaceCorrection.replacement?.metadata.correctedByAppId, "reviewer-app");
+  assert.equal(workspaceCorrection.replacement?.metadata.correctedByActorId, "bob");
+  assert.equal(workspaceCorrection.replacement?.metadata.correctedInThreadId, "review-thread");
+  assert.equal(
+    (await service.getProfile(t, workspaceOld.appId, workspaceOld.actorId)).byType.fact.includes(workspaceExisting.text),
+    false,
+    "exact reuse retains the canonical row's producer profile instead of rewriting provenance",
+  );
+
+  const audit = new Pool({ connectionString: env.url, max: 1, allowExitOnIdle: true });
+  try {
+    const rows = await audit.query<{ id: string; text: string; status: string; metadata: Record<string, unknown> }>(
+      "SELECT id, text, status, metadata FROM memories WHERE tenant_id = $1 ORDER BY created_at, id",
+      [t],
+    );
+    assert.equal(rows.rows.find((row) => row.id === old.id)?.status, "superseded");
+    assert.equal(rows.rows.find((row) => row.id === old.id)?.metadata.supersededBy, existing.id);
+    assert.equal(rows.rows.filter((row) => row.text.startsWith("The launch is") && row.status === "active").length, 1);
+    assert.equal(rows.rows.find((row) => row.id === raceOld.id)?.status, "superseded");
+  } finally {
+    await audit.end();
+  }
+
+  const raceProvider = new PostgresMemoryProvider({ connectionString: env.url, poolMax: 2 });
+  const originalGet = raceProvider.getById.bind(raceProvider);
+  let injectedEdit = false;
+  raceProvider.getById = async (id, scope) => {
+    const snapshot = await originalGet(id, scope);
+    if (snapshot && !injectedEdit) {
+      injectedEdit = true;
+      await raceProvider.update({ ...snapshot, text: "The deploy starts on Tuesday" });
+    }
+    return snapshot;
+  };
+  try {
+    const raceService = new MemoryCoreService(raceProvider);
+    const [staleSnapshot] = (await raceService.ingest({ observations: [{
+      ...shared,
+      text: "The deploy starts on Monday",
+    }] })).records;
+    const raced = await raceService.supersedeMemory({
+      ...request,
+      memoryId: staleSnapshot.id,
+      newText: "The deploy starts on Tuesday",
+    });
+    assert.deepEqual(raced, { updated: false, atomic: true, failure: "raced" });
+    assert.equal((await originalGet(staleSnapshot.id, request))?.text, "The deploy starts on Tuesday");
+  } finally {
+    await raceProvider.close();
+  }
+});
+
 test("requireIdScope refuses unscoped getById and applyFeedback", { skip }, async () => {
   const t = tenant("strictscope");
   const row = record({ tenantId: t, text: "strict scope target row" });

@@ -950,3 +950,154 @@ state what still prevents a provider leaderboard claim.
   or LangMem. Credentials and provider adapters are still needed for those rows.
 - Retrieval and constrained QA benchmarks do not prove autonomous agent task uplift. The
   paired L3/O1/O2 memory-on/off campaign remains a separate release gate.
+
+## Run: 2026-09-04 10:53 (WIB)
+
+### Scope
+
+Turn the remote Kimi experiment into a narrowly reviewed benchmark-integrity change, merge all
+approved work, and audit the current evidence and execution state before comparing Memory Core
+with Hindsight.
+
+### Changes
+
+- Isolated the useful Kimi cache-provenance work from its rejected temporal-conflict and BM25
+  experiments and merged it through PR #5. PRs #4 and #5 are merged; GitHub has no open PRs.
+- Bound LongMemEval Mode A resume and aggregation to the exact repository SHA/root, prepared
+  dataset SHA, and seed. Worker and aggregator selection now use one deterministic lexical rule.
+- Made Mode A fail closed on malformed controls, missing questions, errored rows, invalid
+  subsets, and incomplete runs instead of emitting a successful-looking aggregate.
+- Extended the same integrity boundary through Mode B: retrieval rows and QA cache rows are
+  filtered by complete run identity, retrieval system, model, and condition; expected question
+  IDs come from the manifest; all conditions are validated before credentials or paid calls.
+- Changed provenance checks to reject non-ignored untracked files, preventing uncommitted source
+  or configuration from being stamped as a clean revision.
+- Reviewed Hindsight's backend-neutral Agent Memory Benchmark. Its published LoCoMo and
+  LongMemEval results are useful orientation, but the current Memory Core figures use different
+  ingestion units, prompts, reader/judge models, and context budgets and cannot support a delta.
+- Refreshed the local orchestration dashboard. It now shows the Hindsight AMB adapter/run and a
+  latest-master bench qualification as queued rather than implying that old watchers are tests.
+
+### How It Works Now
+
+1. Mode A workers stamp each retrieval row with code, checkout, dataset, and seed identity.
+2. Aggregation accepts only matching rows, selects the manifest-defined denominator, and exits
+   nonzero for stale, missing, malformed, incomplete, or errored evidence.
+3. Mode B validates a complete matching Mode A population before loading the API key, then
+   resumes only QA rows matching its full model/retrieval/condition identity.
+4. A direct Hindsight comparison still requires a Memory Core provider adapter inside the
+   frozen AMB harness and two result tracks: native defaults and equal context budgets.
+
+### Files Touched
+
+- `bench/longmemeval/integrity.ts`, `integrity.test.ts` — shared run identity, selection,
+  completeness checks, and focused regressions.
+- `bench/longmemeval/modeA.ts`, `modeA-worker.ts`, `aggregate.ts` — deterministic, fail-closed
+  retrieval execution and aggregation.
+- `bench/longmemeval/modeB.ts` — manifest-derived denominator and identity-safe QA resumption.
+- `bench/longmemeval/provenance.ts` — clean-tree verification including non-ignored untracked
+  files.
+- `package.json`, `bench/longmemeval/package.json` — integrity tests included in normal suites.
+- `.orchestration/status.json` — local ignored dashboard state refreshed with the actual gates.
+- `docs/CODEX_RUN_SUMMARY.md` — this handoff entry.
+
+### Validation
+
+- Kimi performed repeated adversarial reviews. It initially blocked the PR on Mode A and Mode B
+  false-pass paths; every blocker and major was fixed. Its final exact-commit verdict was
+  merge-ready with no blocker or major, and its last cost-safety advisory was fixed before merge.
+- Final local Node 20 suite: 195 tests, 194 passed, zero failed, one optional ONNX skip. Root and
+  benchmark TypeScript checks and `git diff --check` passed.
+- Final GitHub CI passed on Node 20/22, benchmark, framework compatibility, Postgres 14,
+  pgvector/Postgres 16, and the production container. Upstream `master` is `95bd547`.
+- Read-only bench-host inspection on 2026-09-04 found no live Memory Core benchmark worker. The
+  four apparent jobs are 36-day-old watcher shells; the main checkout remains at `5ea3852` and
+  the healthy compatibility containers predate current master.
+- A fresh Claude Opus review of current master was not verified; the dashboard retains the
+  previously recorded revoked-OAuth blocker rather than treating the old-snapshot review as new.
+
+### Risks / Follow-ups
+
+- There is no same-protocol Memory Core versus Hindsight score. Implement and run the designed
+  `memory-core-http` AMB adapter on LoCoMo, LongMemEval-S, and PrecisionMemBench before making a
+  competitive quality claim.
+- Deploy `95bd547` to the bench host and run a real current-master long-duration, paired
+  memory-on/off agent qualification. No such job is active now.
+- Current evidence supports a guarded public beta, not an SOTA-memory claim. Temporal conflict
+  resolution, multi-hop synthesis, and agent task uplift remain unproven comparative gaps.
+
+## Run: 2026-09-04 12:13 (WIB)
+
+### Scope
+
+Add a production-safe explicit correction primitive across the service, PostgreSQL, SDK, MCP,
+and Hermes surfaces; close tenant-wide mutation and legacy-fallback gaps; and qualify the current
+upstream build through a fault-injected multi-framework canary before starting the 24-hour soak.
+
+### Changes
+
+- Added `POST /v1/memory/supersede` plus SDK/tool bindings. In-memory and PostgreSQL create or
+  reuse the replacement and retire the old record atomically; file and legacy providers expose
+  their two-write outcome as `atomic: false` and report any half-revised state as `partial: true`.
+- Closed tenant-scope privilege escalation: principal credentials cannot publish, supersede, or
+  retire tenant-wide evidence; tenant-admin and global grants retain those operations.
+- Made exact-replacement reuse retention-safe. It keeps the canonical row's producer provenance,
+  adopts the corrected record's decay policy, merges confidence/importance conservatively, and
+  appends backward-compatible `supersessionHistory`; every retired source links to the saved id.
+- Converted benign locked rechecks to typed `raced` results, distinguished provider failures from
+  races, and documented the PostgreSQL deadlock/serialization retry ceiling.
+- Restricted new-client/old-server downgrade to HTTP 404/405. Validation, auth, rate limit,
+  malformed 2xx JSON, network/timeout, and server errors fail closed in TypeScript and Hermes.
+- Fixed `npm run bench:context -- --size=large` so the requested dataset size reaches the runner.
+
+### How It Works Now
+
+1. HTTP validates and authorizes the caller, resolves the active target scope, and applies the
+   same tenant-wide publication gate used by ingest.
+2. The service builds a replacement in the target's visibility locus and records the correcting
+   principal separately from the original producer coordinates.
+3. PostgreSQL locks the source row and commits exact reuse/insertion plus retirement in one
+   transaction; in-memory performs one uninterrupted synchronous commit point.
+4. Legacy providers store the replacement first and then retire the source. The returned result
+   explicitly exposes non-atomic success, a retirement race, or a post-write provider failure.
+5. Remote tools use the atomic route and enter the compatibility sequence only when that route is
+   genuinely absent. Ordinary ingest still does not perform semantic contradiction discovery.
+
+### Files Touched
+
+- `src/types.ts`, `src/provider.ts`, `src/service.ts`, `src/utils.ts` — correction contract,
+  orchestration, lifecycle outcomes, and backward-compatible history.
+- `src/providers/in-memory-provider.ts`, `src/providers/postgres-provider.ts` — atomic provider
+  implementations and exact-reuse semantics.
+- `src/http.ts`, `src/client.ts`, `src/integrations/tools.ts` — authenticated REST/SDK/MCP flow and
+  fail-closed legacy negotiation.
+- `src/integrations/adapters/hermes-plugin/tools.py` — atomic Hermes correction with guarded
+  legacy compatibility and structured partial outcomes.
+- Matching TypeScript, PostgreSQL, and Python tests plus `README.md`, architecture, provider, and
+  integration documentation.
+
+### Validation
+
+- Node 22 application suite: 219 tests, 218 passed, zero failed, one optional ONNX test skipped.
+- Live PostgreSQL suite: 43 tests, 36 passed, zero failed, seven pgvector-only tests skipped
+  because the local database lacks the extension. Atomic reuse, races, concurrency, audit links,
+  migration integrity, and deadlock regression tests passed.
+- Root and benchmark TypeScript checks, `git diff --check`, seven Hermes contract tests, and the
+  embedded file-backed MCP remember/recall/restart/supersede/forget verifier passed.
+- Claude Opus reviewed a frozen code-only snapshot after the original blocker repairs and returned
+  `CLEAR` with no blockers. A later local audit found one structured Hermes partial-outcome minor;
+  it was fixed and retested, so the final commit still requires a fresh exact-snapshot clearance.
+- On the bench host, the exact-upstream `95bd547` 900-second canary passed 3,436 requests, 430
+  acknowledged writes, all 11 framework probes, four graceful/SIGKILL faults, and five audits
+  covering 918 records with zero loss or isolation failures. A detached 24-hour primary run is
+  active and expected to finish around 2026-09-05 11:57 WIB.
+
+### Risks / Follow-ups
+
+- Explicit supersede is not automatic semantic conflict detection. A separately tested
+  conservative context-time stale filter is not part of this commit and needs its own review.
+- The active 24-hour run qualifies compatibility, durability, isolation, and recovery on
+  `95bd547`; it does not test this unpushed correction branch or autonomous task uplift.
+- Local pgvector execution, backup/restore, multi-replica rollout, and a same-harness public
+  provider comparison remain open gates. The Agent Memory Benchmark adapter exists in an isolated
+  external-repository worktree but is not merged and has not produced a publishable score.

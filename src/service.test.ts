@@ -92,6 +92,284 @@ test("ingest dedupes memories and buildContext returns selected memories", async
   );
 });
 
+test("supersede atomically retires the old memory and links the replacement", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const [old] = (await service.ingest({
+    observations: [{
+      tenantId: "revision-tenant",
+      appId: "planner",
+      actorId: "alice",
+      memoryType: "profile",
+      text: "Alice lives in Berlin",
+      source: { sourceType: "test" },
+      decayPolicy: { kind: "none" },
+    }],
+  })).records;
+
+  const result = await service.supersedeMemory({
+    memoryId: old.id,
+    newText: "Alice lives in Lisbon",
+    reason: "relocated",
+    tenantId: old.tenantId,
+    spaceId: old.spaceId,
+    appId: "planner",
+    actorId: "alice",
+    source: { sourceType: "test-correction" },
+  });
+
+  assert.equal(result.updated, true);
+  assert.equal(result.created, true);
+  assert.equal(result.previous?.status, "superseded");
+  assert.equal(result.previous?.metadata.supersededBy, result.replacement?.id);
+  assert.equal(result.replacement?.metadata.supersedes, old.id);
+  assert.deepEqual(result.replacement?.metadata.supersessionHistory, [
+    { memoryId: old.id, reason: "relocated" },
+  ]);
+  assert.equal(result.replacement?.memoryType, "profile");
+  assert.equal(await provider.getById(old.id, {
+    tenantId: old.tenantId,
+    spaceId: old.spaceId,
+    appId: old.appId,
+    actorId: old.actorId,
+  }), null);
+  assert.deepEqual(
+    (await service.search({
+      query: "Alice lives",
+      filters: { tenantId: old.tenantId, spaceId: old.spaceId, appId: old.appId, actorId: old.actorId },
+    })).map((hit) => hit.memory.text),
+    ["Alice lives in Lisbon"],
+  );
+});
+
+test("supersede rejects empty and oversized corrections before reading or writing", async () => {
+  let reads = 0;
+  class ReadCountingProvider extends InMemoryProvider {
+    override async getById(id: string, scope?: Parameters<InMemoryProvider["getById"]>[1]) {
+      reads++;
+      return super.getById(id, scope);
+    }
+  }
+  const provider = new ReadCountingProvider();
+  const service = new MemoryCoreService(provider);
+  const request = {
+    memoryId: "mem_invalid",
+    tenantId: "revision-tenant",
+    appId: "planner",
+    actorId: "alice",
+    source: { sourceType: "test-correction" },
+  };
+
+  await assert.rejects(
+    service.supersedeMemory({ ...request, newText: "  " }),
+    /newText must be 4\.\.1000 characters/,
+  );
+  await assert.rejects(
+    service.supersedeMemory({ ...request, newText: "x".repeat(1001) }),
+    /newText must be 4\.\.1000 characters/,
+  );
+  assert.equal(reads, 0);
+  assert.equal(provider.dumpRecords().length, 0);
+});
+
+test("supersede reuses an exact active replacement and concurrent corrections have one winner", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const shared = {
+    tenantId: "revision-race-tenant",
+    appId: "planner",
+    actorId: "alice",
+    memoryType: "fact" as const,
+    source: { sourceType: "test" },
+    decayPolicy: { kind: "none" as const },
+  };
+  const initial = await service.ingest({ observations: [
+    { ...shared, text: "The release is Monday", confidence: 0.9, importance: 0.8 },
+    {
+      ...shared,
+      text: "The release is Tuesday",
+      decayPolicy: { kind: "time", ttlDays: 1 },
+      metadata: { supersedes: "legacy-memory", supersedeReason: "legacy reason" },
+      confidence: 0.2,
+      importance: 0.1,
+      source: { sourceType: "canonical-source" },
+    },
+  ] });
+  const [old, existing] = initial.records;
+  const scope = {
+    tenantId: old.tenantId,
+    spaceId: old.spaceId,
+    appId: old.appId,
+    actorId: old.actorId,
+    source: { sourceType: "test-correction" },
+  };
+
+  const reused = await service.supersedeMemory({
+    ...scope,
+    memoryId: old.id,
+    newText: existing.text,
+  });
+  assert.equal(reused.updated, true);
+  assert.equal(reused.created, false);
+  assert.equal(reused.replacement?.id, existing.id);
+  assert.deepEqual(reused.replacement?.decayPolicy, old.decayPolicy);
+  assert.equal(reused.replacement?.confidence, old.confidence);
+  assert.equal(reused.replacement?.importance, old.importance);
+  assert.equal(reused.replacement?.source.sourceType, "canonical-source");
+
+  const [secondOld] = (await service.ingest({ observations: [
+    { ...shared, text: "The release is Sunday" },
+  ] })).records;
+  const reusedAgain = await service.supersedeMemory({
+    ...scope,
+    memoryId: secondOld.id,
+    newText: existing.text,
+    reason: "second source agreed",
+  });
+  assert.equal(reusedAgain.replacement?.id, existing.id);
+  assert.deepEqual(reusedAgain.replacement?.metadata.supersessionHistory, [
+    { memoryId: "legacy-memory", reason: "legacy reason" },
+    { memoryId: old.id, reason: null },
+    { memoryId: secondOld.id, reason: "second source agreed" },
+  ]);
+  assert.equal((await provider.getById(old.id))?.status, undefined);
+  assert.equal((await provider.getById(secondOld.id))?.status, undefined);
+
+  const [raceOld] = (await service.ingest({ observations: [{ ...shared, text: "The launch is Wednesday" }] })).records;
+  const outcomes = await Promise.all([
+    service.supersedeMemory({ ...scope, memoryId: raceOld.id, newText: "The launch is Thursday" }),
+    service.supersedeMemory({ ...scope, memoryId: raceOld.id, newText: "The launch is Friday" }),
+  ]);
+  assert.equal(outcomes.filter((outcome) => outcome.updated).length, 1);
+  assert.equal(outcomes.filter((outcome) => outcome.failure === "raced").length, 1);
+  assert.equal(
+    (await provider.listVisible({
+      tenantId: shared.tenantId,
+      appId: shared.appId,
+      actorId: shared.actorId,
+    })).filter((record) => record.text.startsWith("The launch is")).length,
+    1,
+  );
+});
+
+test("supersede reports a typed race when the source changes to the requested value", async () => {
+  class ConcurrentEditProvider extends InMemoryProvider {
+    private edited = false;
+
+    override async getById(id: string, scope?: Parameters<InMemoryProvider["getById"]>[1]) {
+      const snapshot = await super.getById(id, scope);
+      if (snapshot && !this.edited) {
+        this.edited = true;
+        await this.update({ ...snapshot, text: "The deploy starts on Tuesday" });
+      }
+      return snapshot;
+    }
+  }
+
+  const provider = new ConcurrentEditProvider();
+  const service = new MemoryCoreService(provider);
+  const [old] = (await service.ingest({ observations: [{
+    tenantId: "revision-race-edit",
+    appId: "planner",
+    actorId: "alice",
+    memoryType: "fact",
+    text: "The deploy starts on Monday",
+    source: { sourceType: "test" },
+  }] })).records;
+
+  const result = await service.supersedeMemory({
+    memoryId: old.id,
+    newText: "The deploy starts on Tuesday",
+    tenantId: old.tenantId,
+    spaceId: old.spaceId,
+    appId: old.appId,
+    actorId: old.actorId,
+    source: { sourceType: "test-correction" },
+  });
+  assert.deepEqual(result, { updated: false, atomic: true, failure: "raced" });
+  assert.equal(provider.dumpRecords().length, 1);
+  assert.equal(provider.dumpRecords()[0]?.text, "The deploy starts on Tuesday");
+});
+
+test("supersede preserves a thread visibility locus and fails closed without thread access", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const [old] = (await service.ingest({
+    observations: [{
+      tenantId: "revision-thread-tenant",
+      spaceId: "workspace-a",
+      appId: "planner",
+      actorId: "alice",
+      threadId: "thread-private",
+      memoryType: "fact",
+      scope: "thread",
+      text: "The private review is Monday",
+      source: { sourceType: "test" },
+      decayPolicy: { kind: "none" },
+    }],
+  })).records;
+
+  const denied = await service.supersedeMemory({
+    memoryId: old.id,
+    newText: "The private review is Tuesday",
+    tenantId: old.tenantId,
+    spaceId: old.spaceId,
+    appId: old.appId,
+    actorId: old.actorId,
+    source: { sourceType: "test-correction" },
+  });
+  assert.deepEqual(denied, { updated: false, failure: "not_found" });
+
+  const corrected = await service.supersedeMemory({
+    memoryId: old.id,
+    newText: "The private review is Tuesday",
+    tenantId: old.tenantId,
+    spaceId: old.spaceId,
+    appId: old.appId,
+    actorId: old.actorId,
+    accessThreadId: old.threadId!,
+    source: { sourceType: "test-correction" },
+  });
+  assert.equal(corrected.updated, true);
+  assert.equal(corrected.replacement?.scope, "thread");
+  assert.equal(corrected.replacement?.threadId, old.threadId);
+});
+
+test("workspace correction preserves its owner coordinates and records the correcting principal", async () => {
+  const provider = new InMemoryProvider();
+  const service = new MemoryCoreService(provider);
+  const [old] = (await service.ingest({ observations: [{
+    tenantId: "revision-workspace-tenant",
+    spaceId: "shared-workspace",
+    appId: "planner",
+    actorId: "alice",
+    threadId: "origin-thread",
+    memoryType: "fact",
+    scope: "workspace",
+    text: "The shared release channel is alpha",
+    source: { sourceType: "test" },
+    decayPolicy: { kind: "none" },
+  }] })).records;
+
+  const corrected = await service.supersedeMemory({
+    memoryId: old.id,
+    newText: "The shared release channel is stable",
+    tenantId: old.tenantId,
+    spaceId: old.spaceId,
+    appId: "reviewer",
+    actorId: "bob",
+    accessThreadId: "review-thread",
+    source: { sourceType: "test-correction" },
+  });
+  assert.equal(corrected.updated, true);
+  assert.equal(corrected.replacement?.appId, old.appId);
+  assert.equal(corrected.replacement?.actorId, old.actorId);
+  assert.equal(corrected.replacement?.threadId, old.threadId);
+  assert.equal(corrected.replacement?.metadata.correctedByAppId, "reviewer");
+  assert.equal(corrected.replacement?.metadata.correctedByActorId, "bob");
+  assert.equal(corrected.replacement?.metadata.correctedInThreadId, "review-thread");
+});
+
 test("buildContext enforces maxChars over the complete prompt and prioritizes relevant evidence", async () => {
   const provider = new InMemoryProvider();
   const service = new MemoryCoreService(provider);
@@ -504,7 +782,7 @@ test("file provider persists records across service instances", async () => {
   try {
     const providerA = new FileProvider(filePath);
     const serviceA = new MemoryCoreService(providerA);
-    await serviceA.ingest({
+    const [old] = (await serviceA.ingest({
       observations: [
         {
           tenantId: "camp",
@@ -515,15 +793,62 @@ test("file provider persists records across service instances", async () => {
           source: { sourceType: "assistant_reply" },
         },
       ],
+    })).records;
+    const correction = await serviceA.supersedeMemory({
+      memoryId: old.id,
+      newText: "Wants to post every Tuesday and Thursday",
+      reason: "schedule changed",
+      tenantId: old.tenantId,
+      spaceId: old.spaceId,
+      appId: old.appId,
+      actorId: old.actorId,
+      source: { sourceType: "assistant_reply" },
     });
+    assert.equal(correction.updated, true);
+    assert.equal(correction.atomic, false, "snapshot fallback reports its two-write semantics honestly");
+    await providerA.close();
 
     const providerB = new FileProvider(filePath);
     const serviceB = new MemoryCoreService(providerB);
     const profile = await serviceB.getProfile("camp", "maitrix", "wallet_abc");
     assert.equal(profile.count, 1);
+    assert.deepEqual(profile.byType.goal, ["Wants to post every Tuesday and Thursday"]);
+    await providerB.close();
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test("legacy supersede reports a partial correction when retirement throws", async () => {
+  const provider = new InMemoryProvider();
+  Object.defineProperty(provider, "supersedeWithReplacement", { value: undefined });
+  const service = new MemoryCoreService(provider);
+  const [old] = (await service.ingest({ observations: [{
+    tenantId: "partial-tenant",
+    appId: "planner",
+    actorId: "alice",
+    memoryType: "fact",
+    text: "The migration starts on Monday",
+    source: { sourceType: "test" },
+  }] })).records;
+  provider.retire = async () => {
+    throw new Error("simulated persistence failure");
+  };
+
+  const result = await service.supersedeMemory({
+    memoryId: old.id,
+    newText: "The migration starts on Tuesday",
+    tenantId: old.tenantId,
+    spaceId: old.spaceId,
+    appId: old.appId,
+    actorId: old.actorId,
+    source: { sourceType: "test-correction" },
+  });
+  assert.equal(result.updated, false);
+  assert.equal(result.atomic, false);
+  assert.equal(result.failure, "provider_error");
+  assert.equal(result.partial, true);
+  assert.equal(result.replacement?.text, "The migration starts on Tuesday");
 });
 
 const TENANT = { tenantId: "camp", appId: "pacer" };
@@ -1037,12 +1362,55 @@ test("http api accepts every memory type and preserves source metadata", async (
     assert.deepEqual(body.records.map((record) => record.memoryType).sort(), ["pattern", "summary"]);
 
     const pattern = body.records.find((record) => record.memoryType === "pattern");
+    const summary = body.records.find((record) => record.memoryType === "summary");
     assert.equal(pattern?.source.metadata?.role, "user");
 
     const profile = await service.getProfile(TENANT.tenantId, TENANT.appId, "user_http");
     assert.equal(profile.byType.pattern.length, 1);
     assert.equal(profile.byType.summary.length, 1);
     assert.match(profile.summary, /Patterns|Summaries/);
+
+    const correctionBase = {
+      memoryId: summary!.id,
+      newText: "Session covered onboarding, billing, and permissions",
+      reason: "scope expanded",
+      tenantId: "camp",
+      appId: "pacer",
+      actorId: "user_http",
+      source: { sourceType: "http-test" },
+    };
+    const shortCorrection = await fetch(`${base}/v1/memory/supersede`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...correctionBase, newText: "no" }),
+    });
+    assert.equal(shortCorrection.status, 400);
+    const missingSource = await fetch(`${base}/v1/memory/supersede`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...correctionBase, source: undefined }),
+    });
+    assert.equal(missingSource.status, 400);
+    const deniedSupersede = await fetch(`${base}/v1/memory/supersede`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...correctionBase, actorId: "other_actor" }),
+    });
+    assert.equal(((await deniedSupersede.json()) as { updated: boolean }).updated, false);
+    const corrected = await fetch(`${base}/v1/memory/supersede`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(correctionBase),
+    });
+    const correctedBody = (await corrected.json()) as {
+      updated: boolean;
+      atomic: boolean;
+      replacement?: { id: string; memoryType: string; metadata: Record<string, unknown> };
+    };
+    assert.equal(correctedBody.updated, true);
+    assert.equal(correctedBody.atomic, true);
+    assert.equal(correctedBody.replacement?.memoryType, "summary");
+    assert.equal(correctedBody.replacement?.metadata.supersedes, summary!.id);
 
     const targetId = pattern!.id;
     const owner = { tenantId: "camp", appId: "pacer", actorId: "user_http" };
@@ -1243,6 +1611,12 @@ test("tenant API keys enforce every route before mutations and reserve compactio
       ["/v1/memory/context", { query: "Caddy", filters: identity("tenant-b") }],
       ["/v1/memory/get", { memoryId: record.id, ...identity("tenant-b") }],
       ["/v1/memory/status", { memoryId: record.id, status: "archived", ...identity("tenant-b") }],
+      ["/v1/memory/supersede", {
+        memoryId: record.id,
+        newText: "Tenant beta uses Envoy at the edge",
+        source: { sourceType: "test" },
+        ...identity("tenant-b"),
+      }],
       ["/v1/memory/feedback", { memoryId: record.id, signal: "positive", ...identity("tenant-b") }],
     ];
     for (const [path, body] of wrongTenantBodies) {
@@ -1289,9 +1663,11 @@ test("tenant API keys enforce every route before mutations and reserve compactio
   }
 });
 
-test("principal API keys cannot impersonate another actor or publish tenant-wide memory", async () => {
+test("principal API keys cannot impersonate another actor or publish or supersede tenant-wide memory", async () => {
   const provider = new InMemoryProvider();
-  const app = createMemoryCoreApp(new MemoryCoreService(provider), {
+  const service = new MemoryCoreService(provider);
+  const app = createMemoryCoreApp(service, {
+    tenantApiKeys: new Map([["acme", new Set(["acme-admin-key"])]]),
     principalApiKeys: [{
       key: "alice-agent-key",
       tenantId: "acme",
@@ -1305,11 +1681,12 @@ test("principal API keys cannot impersonate another actor or publish tenant-wide
   const server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const post = (path: string, body: unknown) => fetch(`${base}${path}`, {
+  const postWithKey = (path: string, body: unknown, key: string) => fetch(`${base}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": "alice-agent-key" },
+    headers: { "content-type": "application/json", "x-api-key": key },
     body: JSON.stringify(body),
   });
+  const post = (path: string, body: unknown) => postWithKey(path, body, "alice-agent-key");
   const identity = {
     tenantId: "acme",
     spaceId: "shared-workspace",
@@ -1336,6 +1713,42 @@ test("principal API keys cannot impersonate another actor or publish tenant-wide
     }] });
     assert.equal(tenantWide.status, 403);
 
+    const adminTenantWide = await postWithKey("/v1/memory/ingest", { observations: [{
+      ...identity,
+      scope: "tenant",
+      memoryType: "fact",
+      text: "The tenant-wide support policy is standard",
+      source: { sourceType: "admin-test" },
+    }] }, "acme-admin-key");
+    assert.equal(adminTenantWide.status, 200);
+    const tenantRecord = ((await adminTenantWide.json()) as { records: MemoryRecord[] }).records[0]!;
+    const deniedTenantCorrection = await post("/v1/memory/supersede", {
+      ...identity,
+      memoryId: tenantRecord.id,
+      newText: "The tenant-wide support policy is attacker controlled",
+      source: { sourceType: "principal-test" },
+    });
+    assert.equal(deniedTenantCorrection.status, 403);
+    const deniedTenantRetirement = await post("/v1/memory/status", {
+      ...identity,
+      memoryId: tenantRecord.id,
+      status: "archived",
+    });
+    assert.equal(deniedTenantRetirement.status, 403);
+    assert.equal((await provider.getById(tenantRecord.id))?.status, "active");
+    assert.equal(
+      provider.dumpRecords().some((record) => record.text.includes("attacker controlled")),
+      false,
+    );
+    const acceptedTenantCorrection = await postWithKey("/v1/memory/supersede", {
+      ...identity,
+      memoryId: tenantRecord.id,
+      newText: "The tenant-wide support policy is administrator controlled",
+      source: { sourceType: "admin-test" },
+    }, "acme-admin-key");
+    assert.equal(acceptedTenantCorrection.status, 200);
+    assert.equal(((await acceptedTenantCorrection.json()) as { updated: boolean }).updated, true);
+
     const accepted = await post("/v1/memory/ingest", { observations: [{
       ...identity,
       scope: "workspace",
@@ -1344,6 +1757,15 @@ test("principal API keys cannot impersonate another actor or publish tenant-wide
       source: { sourceType: "test" },
     }] });
     assert.equal(accepted.status, 200);
+    const workspaceRecord = ((await accepted.json()) as { records: MemoryRecord[] }).records[0]!;
+    const acceptedWorkspaceCorrection = await post("/v1/memory/supersede", {
+      ...identity,
+      memoryId: workspaceRecord.id,
+      newText: "Alice approved the legitimate production launch",
+      source: { sourceType: "principal-test" },
+    });
+    assert.equal(acceptedWorkspaceCorrection.status, 200);
+    assert.equal(((await acceptedWorkspaceCorrection.json()) as { updated: boolean }).updated, true);
 
     assert.equal((await post("/v1/memory/search", {
       query: "launch",
@@ -1359,8 +1781,9 @@ test("principal API keys cannot impersonate another actor or publish tenant-wide
     })).status, 200);
 
     const visible = await provider.listVisible(identity);
-    assert.equal(visible.length, 1);
-    assert.equal(visible[0]?.actorId, "alice");
+    assert.equal(visible.length, 2);
+    assert.ok(visible.every((record) => record.actorId === "alice"));
+    assert.ok(visible.some((record) => record.scope === "tenant"));
   } finally {
     await new Promise<void>((resolve) => {
       server.close(() => resolve());

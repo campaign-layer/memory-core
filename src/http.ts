@@ -137,6 +137,13 @@ const retireSchema = idAccessSchema.extend({
   metadata: metadataPatchSchema.optional(),
 });
 
+const supersedeSchema = idAccessSchema.extend({
+  newText: z.string().trim().min(4).max(1000),
+  reason: z.string().max(200).optional().nullable(),
+  source: sourceSchema,
+  metadata: boundedMetadataSchema.optional(),
+});
+
 // The public type stays optional for legacy in-process callers, but every HTTP
 // feedback mutation carries the complete caller identity. A tenant/space pair
 // alone must not mutate another actor's private record in a shared space.
@@ -526,7 +533,25 @@ export function createMemoryCoreApp(service: MemoryCoreService, options: HttpApp
     if (!parsed.success) return sendValidationError(res, parsed.error);
     if (!authorizePrincipals(res, [parsed.data])) return;
     const { memoryId, status, metadata, ...scope } = parsed.data;
+    const previous = await service.getMemory(memoryId, scope);
+    if (!previous) return res.json({ updated: false });
+    // A principal can contribute within its configured space, but cannot
+    // remove tenant-wide evidence any more than it can publish it.
+    if (!authorizeObservations(res, [{ ...scope, scope: previous.scope }])) return;
     const result = await service.retireMemory(memoryId, status, metadata, scope);
+    return res.json(result);
+  }));
+
+  app.post("/v1/memory/supersede", withAsync(async (req: Request, res: Response) => {
+    const parsed = supersedeSchema.safeParse(req.body);
+    if (!parsed.success) return sendValidationError(res, parsed.error);
+    if (!authorizePrincipals(res, [parsed.data])) return;
+    // Supersede retains the target's scope. Apply the same tenant-wide publish
+    // restriction as ingest before accepting caller-authored replacement text.
+    const previous = await service.getMemory(parsed.data.memoryId, parsed.data);
+    if (!previous) return res.json({ updated: false, failure: "not_found" });
+    if (!authorizeObservations(res, [{ ...parsed.data, scope: previous.scope }])) return;
+    const result = await service.supersedeMemory(parsed.data);
     return res.json(result);
   }));
 
